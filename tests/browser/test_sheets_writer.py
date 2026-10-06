@@ -298,3 +298,18 @@ def test_expanded_multi_row_range_fails_fast():
         writer.read_range("202610", "U19:U21")
     assert [e for e in page.log if e[0] == "press"] == []
     assert page.elapsed < 1.0
+
+
+def test_read_times_out_when_clipboard_stays_empty():
+    writer, page = make()
+    original_press = page.press
+
+    def press(keys):
+        original_press(keys)
+        if keys == "Control+C":
+            page.clipboard_html = None  # Ctrl+C 沒有放入任何內容（例如網頁沒有回應）
+    page.press = press
+    with pytest.raises(WriterError, match="無法正確讀取"):
+        writer.read_range("202610", "B10:B11")
+    assert page.elapsed >= 3.0
+    assert writer._draft is None

@@ -4,6 +4,7 @@ import pytest
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from instrument_booking.browser.session import EdgeSession, NotLoggedIn, open_login_window
+from instrument_booking.browser.sheet_page import OP_TIMEOUT_MS
 
 URL = "https://docs.google.com/spreadsheets/d/FILEID/edit"
 
@@ -12,6 +13,10 @@ class FakePage:
     def __init__(self, final_url, loads=True):
         self.url = "about:blank"
         self.final_url, self.loads = final_url, loads
+        self.default_timeout = None
+
+    def set_default_timeout(self, ms):
+        self.default_timeout = ms
 
     def goto(self, url, wait_until):
         self.url = self.final_url
@@ -99,6 +104,7 @@ def test_restart_closes_then_starts_again():
     session.restart()
     assert context.closed and pw.stopped
     assert session.sheet_page() is not None
+    assert context.pages[0].default_timeout == OP_TIMEOUT_MS  # 網頁操作有時限
 
 
 def test_open_login_window_uses_plain_edge_with_profile(tmp_path):

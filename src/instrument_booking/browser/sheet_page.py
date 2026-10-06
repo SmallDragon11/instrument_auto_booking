@@ -12,19 +12,38 @@ from instrument_booking.core.job import WriterCrashed, WriterError
 NAME_BOX = "#t-name-box"
 ACTIVE_SHEET_TAB = ".docs-sheet-active-tab .docs-sheet-tab-name"  # 已於測試副本實測（2026-10-06）
 
-READ_HTML_JS = """async () => {
-  const items = await navigator.clipboard.read();
-  for (const it of items) {
-    if (it.types.includes('text/html')) return await (await it.getType('text/html')).text();
+OP_TIMEOUT_MS = 3000          # 每個 Playwright 操作（點擊、輸入、讀取名稱方塊等）的時限
+CLIPBOARD_TIMEOUT_MS = 2000   # 剪貼簿讀寫的時限（page.evaluate 本身沒有時限）
+CLIPBOARD_TIMEOUT_MARK = "CLIPBOARD_TIMEOUT"  # 剪貼簿逾時時 reject 的錯誤訊息標記
+
+# 剪貼簿操作與計時器賽跑：逾時就 reject 含 CLIPBOARD_TIMEOUT_MARK 的 Error
+_RACE = """
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error('%(mark)s')), %(ms)d);
+  });
+  try {
+    return await Promise.race([work(), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
-  return null;
-}"""
+""" % {"mark": CLIPBOARD_TIMEOUT_MARK, "ms": CLIPBOARD_TIMEOUT_MS}
+
+READ_HTML_JS = """async () => {
+  const work = async () => {
+    const items = await navigator.clipboard.read();
+    for (const it of items) {
+      if (it.types.includes('text/html')) return await (await it.getType('text/html')).text();
+    }
+    return null;
+  };""" + _RACE + "}"
 
 WRITE_JS = """async ([html, text]) => {
-  const item = {'text/plain': new Blob([text], {type: 'text/plain'})};
-  if (html) item['text/html'] = new Blob([html], {type: 'text/html'});
-  await navigator.clipboard.write([new ClipboardItem(item)]);
-}"""
+  const work = async () => {
+    const item = {'text/plain': new Blob([text], {type: 'text/plain'})};
+    if (html) item['text/html'] = new Blob([html], {type: 'text/html'});
+    await navigator.clipboard.write([new ClipboardItem(item)]);
+  };""" + _RACE + "}"
 
 
 class SheetPage(Protocol):
@@ -56,7 +75,7 @@ class SheetPage(Protocol):
 
 
 def _translate(fn):
-    """Playwright 逾時 → WriterError；其他 Playwright 錯誤（頁面關閉、瀏覽器當掉）→ WriterCrashed。"""
+    """Playwright 逾時、剪貼簿逾時 → WriterError；其他 Playwright 錯誤（頁面關閉、瀏覽器當掉）→ WriterCrashed。"""
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
@@ -65,6 +84,8 @@ def _translate(fn):
         except PlaywrightTimeoutError as e:
             raise WriterError(f"瀏覽器操作逾時：{e}") from e
         except PlaywrightError as e:
+            if CLIPBOARD_TIMEOUT_MARK in str(e):
+                raise WriterError("剪貼簿操作逾時") from e
             raise WriterCrashed(f"瀏覽器異常：{e}") from e
 
     return wrapper
@@ -73,6 +94,7 @@ def _translate(fn):
 class PlaywrightSheetPage:
     def __init__(self, page) -> None:
         self._page = page
+        page.set_default_timeout(OP_TIMEOUT_MS)  # 沒有設定時 Playwright 預設等 30 秒
 
     @_translate
     def jump(self, ref: str) -> None:
