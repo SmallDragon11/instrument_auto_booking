@@ -1,6 +1,7 @@
 import logging
 import os
 from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 
 import pytest
 from playwright.sync_api import Error as PlaywrightError
@@ -28,6 +29,11 @@ from instrument_booking.service.housekeeping import (
 ])
 def test_describe_error(error, expected):
     assert expected in describe_error(error)
+
+
+def test_not_logged_in_tells_user_how_to_log_in_again():
+    assert describe_error(NotLoggedIn("x")) == (
+        "需要重新登入 Google：請到「設定」頁按「重新登入」，登入完成後關閉該 Edge 視窗")
 
 
 def test_describe_runner_error_shows_message_as_is():
@@ -67,3 +73,34 @@ def test_prune_snapshots_keeps_newest(tmp_path):
 
 def test_prune_snapshots_missing_dir_is_fine(tmp_path):
     prune_snapshots(tmp_path / "nope")
+
+
+def make_snapshots(tmp_path, n=7):
+    for i in range(n):
+        p = tmp_path / f"snapshot-{i}.xlsx"
+        p.write_bytes(b"PK")
+        os.utime(p, (1000 + i, 1000 + i))
+
+
+def test_prune_snapshots_ignores_snapshot_deleted_while_listing(tmp_path, monkeypatch):
+    make_snapshots(tmp_path)
+    real_stat = Path.stat
+
+    def stat(self, *args, **kwargs):
+        if self.name == "snapshot-3.xlsx":
+            raise FileNotFoundError(2, "其他執行緒剛刪除", str(self))
+        return real_stat(self, *args, **kwargs)
+    monkeypatch.setattr(Path, "stat", stat)
+    prune_snapshots(tmp_path, keep=5)  # 不可拋出例外（否則成功的預檢會被當成失敗）
+    monkeypatch.undo()
+    assert not (tmp_path / "snapshot-0.xlsx").exists()
+    assert (tmp_path / "snapshot-1.xlsx").exists() and (tmp_path / "snapshot-6.xlsx").exists()
+
+
+def test_prune_snapshots_ignores_unlink_errors(tmp_path, monkeypatch):
+    make_snapshots(tmp_path)
+
+    def unlink(self, *args, **kwargs):
+        raise FileNotFoundError(2, "其他執行緒剛刪除", str(self))
+    monkeypatch.setattr(Path, "unlink", unlink)
+    prune_snapshots(tmp_path, keep=5)

@@ -18,6 +18,8 @@ from instrument_booking.service.housekeeping import describe_error, prune_snapsh
 from instrument_booking.service.occupancy import legend_for_week
 from instrument_booking.service.settings import Settings, validate_settings
 
+NOT_SYNCED = "未校時"
+
 
 @dataclass(frozen=True)
 class ConnectionReport:
@@ -32,13 +34,13 @@ def run_connection_test(store, worker, snapshot_dir: Path, *, sync: Callable[[],
                         local_now: Callable[[], float] = time.monotonic,
                         wall: Callable[[], float] = time.time) -> ConnectionReport:
     """校時、登入、下載表格、讀圖例；不寫入任何東西（會阻塞，請在背景執行緒呼叫）。"""
+    settings = store.load_settings()
+    problems = validate_settings(settings)
+    if problems:  # 設定無效：不連網（不校時、不開瀏覽器）
+        return ConnectionReport(False, "；".join(problems), NOT_SYNCED, 0.0)
     synced = sync()
     clock = Clock(synced, local_now)
     diff = clock.now() - wall()
-    settings = store.load_settings()
-    problems = validate_settings(settings)
-    if problems:
-        return ConnectionReport(False, "；".join(problems), synced.source.value, diff)
     try:
         file_id = file_id_from_url(settings.spreadsheet_url)
         path = worker.submit(
@@ -52,6 +54,8 @@ def run_connection_test(store, worker, snapshot_dir: Path, *, sync: Callable[[],
         prune_snapshots(snapshot_dir)
     except Exception as e:
         return ConnectionReport(False, describe_error(e), synced.source.value, diff)
+    if not legend:
+        return ConnectionReport(False, "已下載預約表，但找不到氣體圖例", synced.source.value, diff)
     return ConnectionReport(True, f"連線正常：已登入並下載預約表，圖例有 {len(legend)} 種氣體",
                             synced.source.value, diff, legend)
 

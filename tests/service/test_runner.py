@@ -35,16 +35,16 @@ class FakeTime:
         self.t += s
 
 
-def make(tmp_path, page=None, sync_offset=None):
+def make(tmp_path):
     wb = new_workbook()
     add_tube_sheet(wb, "202610", MON)
     session = FakeSession([], request=XlsxRequest(wb))
-    page = page or FakeSheetPage()
+    page = FakeSheetPage()
     session.sheet_page = lambda: page
     session.restart_sheet_page = lambda: page
     worker = InlineWorker(session)
     clock = FakeTime(1000.0)
-    offset = (T0 - 600) - 1000.0 if sync_offset is None else sync_offset  # 預檢時＝T−10 分
+    offset = (T0 - 600) - 1000.0  # 預檢時＝T−10 分
     runner = BookingRunner(worker, snapshot_dir=tmp_path / "snap",
                            sync=lambda: ClockSync(ClockSource.NTP, offset), sleep=clock.sleep,
                            local_now=clock.now,

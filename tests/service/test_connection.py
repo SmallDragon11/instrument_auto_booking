@@ -1,5 +1,4 @@
 from datetime import date
-from pathlib import Path
 
 import pytest
 
@@ -8,17 +7,20 @@ from instrument_booking.service.connection import run_connection_test, start_log
 from instrument_booking.service.settings import Settings
 from instrument_booking.storage.json_store import JsonStore
 from service.fakes import FakeSession, InlineWorker, XlsxRequest
-from sheet_builder import add_tube_sheet, new_workbook
+from sheet_builder import add_oven_sheet, add_tube_sheet, new_workbook
 
 URL = "https://docs.google.com/spreadsheets/d/FILEID/edit"
 NOW_EPOCH = 1_791_522_000.0 - 3 * 86400  # 2026-10-06（二）13:00 台北
 
 
-def make(tmp_path, *, settings=Settings(name="Zoe", spreadsheet_url=URL), request="xlsx"):
+def make(tmp_path, *, settings=Settings(name="Zoe", spreadsheet_url=URL), request="xlsx", tube=True):
     store = JsonStore(tmp_path / "data")
     store.save_settings(settings)
     wb = new_workbook()
-    add_tube_sheet(wb, "202610", date(2026, 10, 12), legend=[("Ar", "A4C2F4")])
+    if tube:
+        add_tube_sheet(wb, "202610", date(2026, 10, 12), legend=[("Ar", "A4C2F4")])
+    else:
+        add_oven_sheet(wb, "10月oven2026", date(2026, 10, 12))
     session = FakeSession([], request=XlsxRequest(wb) if request == "xlsx" else request)
     worker = InlineWorker(session)
     kwargs = dict(sync=lambda: ClockSync(ClockSource.NTP, NOW_EPOCH - 50.0), local_now=lambda: 50.0,
@@ -38,8 +40,12 @@ def test_successful_connection_test_reads_and_caches_legend(tmp_path):
 
 def test_unconfigured_settings_are_reported_without_browser(tmp_path):
     store, worker, kwargs = make(tmp_path, settings=Settings())
-    report = run_connection_test(store, worker, tmp_path / "snap", **kwargs)
+
+    def no_sync():
+        raise AssertionError("設定無效時不可做網路校時")
+    report = run_connection_test(store, worker, tmp_path / "snap", **{**kwargs, "sync": no_sync})
     assert not report.ok and "名字" in report.message
+    assert (report.clock_source, report.clock_diff) == ("未校時", 0.0)
     assert worker.jobs == []
 
 
@@ -56,3 +62,11 @@ def test_start_login_closes_automation_browser_first(tmp_path):
     assert worker.closed == 1
     (args,) = calls
     assert args[-1] == URL and f"--user-data-dir={tmp_path / 'profile'}" in args
+
+
+def test_snapshot_without_gas_legend_is_not_ok(tmp_path):
+    store, worker, kwargs = make(tmp_path, tube=False)
+    report = run_connection_test(store, worker, tmp_path / "snap", **kwargs)
+    assert not report.ok
+    assert report.message == "已下載預約表，但找不到氣體圖例"
+    assert report.legend == {} and store.load_legend() == {}
