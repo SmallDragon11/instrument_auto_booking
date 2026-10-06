@@ -148,3 +148,144 @@ def test_corrupted_schedule_since_raises_store_error(tmp_path):
     (tmp_path / "settings.json").write_text('{"name": "Zoe", "schedule_since": "昨天"}', encoding="utf-8")
     with pytest.raises(StoreError, match="settings.json"):
         JsonStore(tmp_path).schedule_since()
+
+
+# --- 跨執行緒安全的存檔（GUI 與服務執行緒同時讀寫）---
+
+@pytest.fixture
+def fast_retry(monkeypatch):
+    from instrument_booking.storage import json_store
+    monkeypatch.setattr(json_store, "RETRY_DELAY", 0.001)
+
+
+def flaky(monkeypatch, target, name, failures):
+    """前 failures 次呼叫拋 PermissionError（Windows：檔案正被另一個執行緒開啟），之後照常。"""
+    real = getattr(target, name)
+    calls = []
+
+    def wrapper(*args, **kwargs):
+        calls.append(args)
+        if len(calls) <= failures:
+            raise PermissionError(13, "存取被拒")
+        return real(*args, **kwargs)
+    monkeypatch.setattr(target, name, wrapper)
+    return calls
+
+
+def test_replace_retried_on_permission_error(tmp_path, monkeypatch, fast_retry):
+    from instrument_booking.storage import json_store
+    calls = flaky(monkeypatch, json_store.os, "replace", 2)
+    JsonStore(tmp_path).save_legend({"Ar": "A4C2F4"})
+    assert len(calls) == 3
+    assert JsonStore(tmp_path).load_legend() == {"Ar": "A4C2F4"}
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_replace_failing_every_time_raises_store_error_and_cleans_up(tmp_path, monkeypatch, fast_retry):
+    from instrument_booking.storage import json_store
+    calls = flaky(monkeypatch, json_store.os, "replace", 10_000)
+    with pytest.raises(StoreError, match="legend.json"):
+        JsonStore(tmp_path).save_legend({"Ar": "A4C2F4"})
+    assert len(calls) == 10
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_other_write_os_error_becomes_store_error(tmp_path, monkeypatch):
+    from instrument_booking.storage import json_store
+
+    def disk_full(*args):
+        raise OSError(28, "磁碟已滿")
+    monkeypatch.setattr(json_store.os, "replace", disk_full)
+    with pytest.raises(StoreError, match="2026-10-12.json"):
+        JsonStore(tmp_path).save_bookings(MON, [TUBE])
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+def test_read_retried_on_permission_error(tmp_path, monkeypatch, fast_retry):
+    from pathlib import Path
+    store = JsonStore(tmp_path)
+    store.save_legend({"Ar": "A4C2F4"})
+    calls = flaky(monkeypatch, Path, "read_bytes", 2)
+    assert store.load_legend() == {"Ar": "A4C2F4"}
+    assert len(calls) == 3
+
+
+def test_read_failing_every_time_raises_store_error(tmp_path, monkeypatch, fast_retry):
+    from pathlib import Path
+    store = JsonStore(tmp_path)
+    store.save_legend({"Ar": "A4C2F4"})
+    flaky(monkeypatch, Path, "read_bytes", 10_000)
+    with pytest.raises(StoreError, match="legend.json"):
+        store.load_legend()
+
+
+def test_concurrent_saves_and_loads_do_not_corrupt_each_other(tmp_path):
+    import threading
+    store = JsonStore(tmp_path)
+    legends = [{"Ar": "A4C2F4"}, {"H2": "F4CCCC", "N2": "D5A6BD"}]
+    errors = []
+
+    def save_many(legend):
+        try:
+            for _ in range(100):
+                store.save_legend(legend)
+        except Exception as e:  # noqa: BLE001 — 收集起來在主執行緒斷言
+            errors.append(e)
+    def load_many():
+        try:
+            for _ in range(100):
+                assert store.load_legend() in legends
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+    store.save_legend(legends[0])
+    threads = [threading.Thread(target=save_many, args=(legend,)) for legend in legends]
+    threads.append(threading.Thread(target=load_many))
+    for th in threads:
+        th.start()
+    for th in threads:
+        th.join()
+    assert errors == []
+    assert store.load_legend() in legends
+    assert not list(tmp_path.rglob("*.tmp"))
+
+
+# --- 損毀的執行紀錄：隔離後略過，不可讓自動化停擺 ---
+
+def test_corrupt_run_file_is_quarantined_and_skipped(tmp_path):
+    store = JsonStore(tmp_path)
+    good = record(datetime(2026, 10, 2, 13, 0, 1, tzinfo=TAIPEI), monday=date(2026, 10, 5))
+    store.append_run(good)
+    (tmp_path / "runs" / "20261009-130001-000000.json").write_text("{not json", encoding="utf-8")
+    (tmp_path / "runs" / "20261009-130002-000000.json").write_text('{"target_monday": "2026-10-12"}',
+                                                                   encoding="utf-8")
+    assert store.load_runs() == [good]
+    assert store.executed_weeks() == {date(2026, 10, 5)}
+    names = sorted(p.name for p in (tmp_path / "runs").iterdir())
+    assert names == ["20261002-130001-000000.json", "20261009-130001-000000.json.corrupt",
+                     "20261009-130002-000000.json.corrupt"]
+    expected = ["20261009-130001-000000.json.corrupt", "20261009-130002-000000.json.corrupt"]
+    assert store.corrupt_runs() == expected
+    assert JsonStore(tmp_path).corrupt_runs() == expected  # 重新啟動後仍可列出
+
+
+def test_corrupt_run_file_that_cannot_be_renamed_is_still_skipped(tmp_path, monkeypatch):
+    from pathlib import Path
+    store = JsonStore(tmp_path)
+    (tmp_path / "runs").mkdir()
+    (tmp_path / "runs" / "20261009-130001-000000.json").write_bytes(b"\xff\xfe not utf-8")
+
+    def locked(self, target):
+        raise PermissionError(13, "存取被拒")
+    monkeypatch.setattr(Path, "rename", locked)
+    assert store.load_runs() == [] and store.executed_weeks() == set()
+    assert store.corrupt_runs() == ["20261009-130001-000000.json"]
+
+
+def test_unreadable_run_file_still_raises(tmp_path, monkeypatch, fast_retry):
+    from pathlib import Path
+    store = JsonStore(tmp_path)
+    store.append_run(record(datetime(2026, 10, 2, 13, 0, 1, tzinfo=TAIPEI)))
+    flaky(monkeypatch, Path, "read_bytes", 10_000)  # 讀不到≠損毀：不可隔離，否則可能重跑該週
+    with pytest.raises(StoreError):
+        store.load_runs()
+    assert store.corrupt_runs() == []

@@ -2,7 +2,11 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import tempfile
+import threading
+import time as time_module
 from dataclasses import asdict, dataclass, fields
 from datetime import date, datetime, time
 from pathlib import Path
@@ -10,6 +14,15 @@ from typing import Sequence
 
 from instrument_booking.core.models import TAIPEI, BookingRequest, Instrument, ItemResult, ItemStatus, to_taipei
 from instrument_booking.service.settings import Settings
+
+
+log = logging.getLogger("instrument_booking.storage")
+
+# Windows：另一個執行緒正開著檔案（讀取或取代中）時，開檔或 os.replace 會拋 PermissionError，稍後重試即可
+RETRY_TIMES = 10
+RETRY_DELAY = 0.05  # 秒
+
+CORRUPT_SUFFIX = ".corrupt"
 
 
 class StoreError(Exception):
@@ -89,8 +102,12 @@ def settings_from_dict(d: dict) -> Settings:
 
 
 class JsonStore:
+    """GUI 與背景服務會同時使用同一個 JsonStore：每次寫入用唯一的暫存檔，遇到檔案被占用時重試。"""
+
     def __init__(self, root: Path) -> None:
         self.root = root
+        self._lock = threading.Lock()
+        self._unrenamed: set[str] = set()  # 損毀但無法改名的執行紀錄檔（本次執行期間）
 
     # --- 設定 ---
     def load_settings(self) -> Settings:
@@ -138,16 +155,45 @@ class JsonStore:
         self._write(self.root / "runs" / f"{name}.json", run_to_dict(record))
 
     def load_runs(self) -> list[RunRecord]:
-        """最新的在前。"""
+        """最新的在前。
+
+        無法解析的紀錄檔改名為 *.json.corrupt 隔離後略過（改名失敗也略過），不可讓自動化因此停擺；
+        讀不到檔案（例如被占用）則照常拋 StoreError——那不代表損毀，略過可能讓該週被重跑。
+        """
         runs_dir = self.root / "runs"
         if not runs_dir.is_dir():
             return []
-        paths = sorted(runs_dir.glob("*.json"), reverse=True)
-        return [self._convert(run_from_dict, self._read(p), p.name) for p in paths]
+        runs = []
+        for p in sorted(runs_dir.glob("*.json"), reverse=True):
+            raw = self._read_bytes(p)
+            if raw is None:
+                continue  # 列出後被刪除
+            try:
+                runs.append(run_from_dict(json.loads(raw.decode("utf-8"))))
+            except (KeyError, TypeError, ValueError, AttributeError) as e:
+                self._quarantine(p, e)
+        return runs
+
+    def corrupt_runs(self) -> list[str]:
+        """被隔離（損毀）的執行紀錄檔名，供 GUI 顯示警告。"""
+        runs_dir = self.root / "runs"
+        on_disk = {p.name for p in runs_dir.glob(f"*.json{CORRUPT_SUFFIX}")} if runs_dir.is_dir() else set()
+        with self._lock:
+            unrenamed = {n for n in self._unrenamed if (runs_dir / n).exists()}
+        return sorted(on_disk | unrenamed)
 
     def executed_weeks(self) -> set[date]:
         """已有執行紀錄（含預檢失敗而放棄）的目標週：每個目標週只自動執行一次。"""
         return {r.target_monday for r in self.load_runs()}
+
+    def _quarantine(self, path: Path, error: Exception) -> None:
+        log.error("執行紀錄 %s 損毀，已略過：%s", path.name, error)
+        try:
+            path.rename(path.with_name(path.name + CORRUPT_SUFFIX))
+        except OSError:
+            log.exception("無法隔離損毀的執行紀錄 %s", path.name)
+            with self._lock:
+                self._unrenamed.add(path.name)
 
     # --- 氣體圖例快取（離線也能編輯）---
     def load_legend(self) -> dict[str, str]:
@@ -162,12 +208,28 @@ class JsonStore:
         return self.root / "bookings" / f"{monday.isoformat()}.json"
 
     @staticmethod
+    def _read_bytes(path: Path) -> bytes | None:
+        """檔案不存在時回傳 None；被占用時重試；仍失敗拋 StoreError。"""
+        for attempt in range(RETRY_TIMES):
+            try:
+                return path.read_bytes()
+            except FileNotFoundError:
+                return None
+            except PermissionError as e:
+                if attempt == RETRY_TIMES - 1:
+                    raise StoreError(f"無法讀取 {path.name}：{e}") from e
+                time_module.sleep(RETRY_DELAY)
+            except OSError as e:
+                raise StoreError(f"無法讀取 {path.name}：{e}") from e
+
+    @staticmethod
     def _read(path: Path):
-        if not path.exists():
+        raw = JsonStore._read_bytes(path)
+        if raw is None:
             return None
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as e:
+            return json.loads(raw.decode("utf-8"))
+        except ValueError as e:
             raise StoreError(f"無法讀取 {path.name}：{e}") from e
 
     @staticmethod
@@ -179,8 +241,34 @@ class JsonStore:
 
     @staticmethod
     def _write(path: Path, data) -> None:
-        """先寫入暫存檔再取代，避免寫到一半當機留下損毀的檔案。"""
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        os.replace(tmp, path)
+        """先寫入唯一的暫存檔（多個執行緒同時寫同一檔也不互相覆蓋）、確實寫入磁碟後再取代。
+
+        取代時檔案正被其他執行緒開啟會拋 PermissionError，重試；仍失敗的 OSError 一律包成 StoreError。
+        """
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+        tmp = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd, name = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+            tmp = Path(name)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            for attempt in range(RETRY_TIMES):
+                try:
+                    os.replace(tmp, path)
+                    tmp = None
+                    return
+                except PermissionError:
+                    if attempt == RETRY_TIMES - 1:
+                        raise
+                    time_module.sleep(RETRY_DELAY)
+        except OSError as e:
+            raise StoreError(f"無法寫入 {path.name}：{e}") from e
+        finally:
+            if tmp is not None:
+                try:
+                    tmp.unlink()
+                except OSError:
+                    pass
