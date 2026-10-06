@@ -33,13 +33,14 @@ class StoreError(Exception):
 class RunRecord:
     """一次自動預約的紀錄（執行紀錄頁顯示用）。"""
     target_monday: date
-    started_at: datetime
+    started_at: datetime               # 寫入工作開始的時間（放棄或取消時為當下時間）
     late: bool
     clock_source: str | None
     clock_diff: float | None           # 真實時間 − 本機系統時鐘（秒）
     error: str | None                  # 預檢或寫入階段的錯誤（成功時為 None）
     requests: tuple[BookingRequest, ...]
     results: tuple[ItemResult, ...]
+    snapshot_at: datetime | None = None  # 預檢下載快照的時間（沒有預檢成功、或舊版紀錄時為 None）
 
 
 def default_data_dir() -> Path:
@@ -70,7 +71,8 @@ def result_from_dict(d: dict) -> ItemResult:
 def run_to_dict(r: RunRecord) -> dict:
     return {"target_monday": r.target_monday.isoformat(), "started_at": r.started_at.isoformat(), "late": r.late,
             "clock_source": r.clock_source, "clock_diff": r.clock_diff, "error": r.error,
-            "requests": [request_to_dict(q) for q in r.requests], "results": [result_to_dict(x) for x in r.results]}
+            "requests": [request_to_dict(q) for q in r.requests], "results": [result_to_dict(x) for x in r.results],
+            "snapshot_at": r.snapshot_at.isoformat() if r.snapshot_at else None}
 
 
 def run_from_dict(d: dict) -> RunRecord:
@@ -79,7 +81,8 @@ def run_from_dict(d: dict) -> RunRecord:
                      clock_source=d["clock_source"], clock_diff=d["clock_diff"],
                      error=d["error"] if "error" in d else d["preflight_error"],  # 相容舊版欄位名稱
                      requests=tuple(request_from_dict(q) for q in d["requests"]),
-                     results=tuple(result_from_dict(x) for x in d["results"]))
+                     results=tuple(result_from_dict(x) for x in d["results"]),
+                     snapshot_at=datetime.fromisoformat(d["snapshot_at"]) if d.get("snapshot_at") else None)
 
 
 # settings.json 中不屬於 Settings 的欄位：自動預約的星期或時間最後一次被設定的時間（台北時間）。

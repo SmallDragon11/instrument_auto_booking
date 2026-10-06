@@ -14,6 +14,7 @@ from enum import Enum
 from typing import Callable, Protocol, Sequence
 
 from instrument_booking.browser.downloader import file_id_from_url
+from instrument_booking.core.clock import SAFETY_MARGIN, ClockSource
 from instrument_booking.core.models import TAIPEI, BookingRequest, ItemResult, ItemStatus
 from instrument_booking.core.schedule import LATE_THRESHOLD, target_week
 from instrument_booking.service.cycle import (PREFLIGHT_LEAD, RETRY_LEAD, Action, CycleState, current_run_at,
@@ -32,6 +33,8 @@ CANCELLED_BY_USER = "已手動取消"
 CANCEL_SCHEDULE_CHANGED = "自動預約時間已變更，取消本次寫入"
 CANCEL_URL_CHANGED = "預約表網址已變更，取消本次寫入"
 CANCEL_INVALID_SETTINGS = "設定無效，取消本次寫入"
+
+NOT_SYNCED_NOTE = f"（未能網路校時，使用本機時間＋{SAFETY_MARGIN[ClockSource.LOCAL]:g} 秒餘量）"
 
 STATUS_LABEL = {
     ItemStatus.SUCCESS: "成功",
@@ -100,7 +103,7 @@ class AutomationService:
         self._state: CycleState | None = None
         self._prepared = None                              # 預檢成功的規劃（plan_ready 時才有）
         self._planned: tuple[BookingRequest, ...] = ()     # 預檢時實際規劃的預約清單
-        self._last_error: str | None = None                # 最近一次預檢失敗的說明
+        self._last_error: str | None = None                # 本週期最近一次預檢失敗、寫入失敗或取消的說明
         self._service_error: str | None = None             # 已通知過的服務錯誤（同一訊息只通知一次）
         self._cancel = threading.Event()                   # 使用者要求取消本次自動預約（任何執行緒都可設定）
         self._status = ServiceStatus(ServicePhase.IDLE)    # 只整個替換，GUI 讀取不需取 _lock
@@ -229,9 +232,10 @@ class AutomationService:
             self._cancel.clear()
             log.info("沒有進行中的自動預約，忽略取消")
             return False
-        planned = self._planned or tuple(requests)
-        self._discard_plan(CANCELLED_BY_USER)
-        self._cancelled(now, planned, CANCELLED_BY_USER, late=self._is_late(now))
+        planned, had_plan = self._planned or tuple(requests), self._prepared is not None
+        self._cancelled(now, planned, CANCELLED_BY_USER, late=self._is_late(now))  # 會清除規劃
+        if had_plan:
+            self._runner.abandon()  # 關閉待命的 Edge
         return True
 
     def _cancelled(self, now: datetime, requests, reason: str, *, late: bool) -> None:
@@ -239,15 +243,19 @@ class AutomationService:
         self._finish(now, requests, (), error=reason, late=late,
                      title="自動預約已取消", message=f"{reason}（本週不會再自動執行）")
 
-    def _guard(self, settings: Settings, file_id: str) -> Callable[[], str | None]:
+    def _guard(self, settings: Settings, file_id: str, started: list[datetime]) -> Callable[[], str | None]:
         """寫入前的取消檢查（在瀏覽器執行緒呼叫）：回傳取消原因或 None。
 
         服務執行緒此時持有 _lock 並等待寫入結束，所以這裡絕不可取 _lock；只讀旗標與重新讀取設定檔。
         星期或時間與這次寫入所依據的不同，代表目前設定的開放時間已不是 run_at：提早寫入等同偷跑。
+        第一次被呼叫＝寫入工作開始：把（校時後的）時間記在 started。
         """
         schedule = (settings.run_weekday, settings.run_time)
+        clock = self._prepared.clock
 
         def guard() -> str | None:
+            if not started:
+                started.append(datetime.fromtimestamp(clock.now(), TAIPEI))
             if self._cancel.is_set():
                 return CANCELLED_BY_USER
             try:
@@ -270,7 +278,8 @@ class AutomationService:
             self._prepared = self._runner.prepare(settings, requests)
             self._planned = tuple(requests)
             state.plan_ready = True
-            log.info("預檢完成：%s", state.run_at)
+            log.info("預檢完成：%s（校時來源 %s，時鐘差 %+.3f 秒）", state.run_at,
+                     self._prepared.sync.source.value, self._prepared.clock_diff)
         except Exception as e:
             self._last_error = describe_error(e)
             log.warning("第 %d 次預檢失敗：%s", state.preflight_attempts, self._last_error)
@@ -289,27 +298,40 @@ class AutomationService:
                      title="自動預約未執行", message=error)
 
     def _execute(self, now: datetime, settings: Settings) -> None:
-        state, requests = self._state, self._planned  # 紀錄的清單＝實際規劃的那份
-        late = self._is_late(now)
-        guard = self._guard(settings, self._prepared.file_id)
+        state, requests, prepared = self._state, self._planned, self._prepared  # 紀錄的清單＝實際規劃的那份
+        started: list[datetime] = []
+        guard = self._guard(settings, prepared.file_id, started)
         try:
-            results = self._runner.run(self._prepared, settings, state.run_at, guard=guard)
+            results = self._runner.run(prepared, settings, state.run_at, guard=guard)
         except RunCancelled as e:
-            self._cancelled(now, requests, str(e), late=late)
+            self._cancelled(self._started(started, now), requests, str(e), late=self._ended_late(prepared, ()))
             return
         except Exception as e:
             error = describe_error(e)
             log.error("寫入階段失敗：%s", error)
-            self._finish(now, requests, (), error=error, late=late, title="自動預約失敗", message=error)
+            self._finish(self._started(started, now), requests, (), error=error,
+                         late=self._ended_late(prepared, ()), title="自動預約失敗", message=error)
             return
+        late = self._ended_late(prepared, results)
         prefix = "（延遲執行）" if late else ""
-        self._finish(now, requests, results, error=None, late=late,
-                     title="自動預約完成", message=f"{prefix}{summarize(results)}")
+        note = NOT_SYNCED_NOTE if prepared.sync.source is ClockSource.LOCAL else ""
+        self._finish(self._started(started, now), requests, results, error=None, late=late,
+                     title="自動預約完成", message=f"{prefix}{summarize(results)}{note}")
 
-    def _is_late(self, now: datetime) -> bool:
-        return now - self._state.run_at > LATE_THRESHOLD
+    @staticmethod
+    def _started(started: list[datetime], fallback: datetime) -> datetime:
+        """寫入工作開始的時間；工作沒有開始（例如瀏覽器無法啟動）時用 step 決定寫入的時間。"""
+        return started[0] if started else fallback
 
-    def _finish(self, now: datetime, requests, results, *, error: str | None, late: bool,
+    def _ended_late(self, prepared, results) -> bool:
+        """以實際第一筆寫入的時間判斷是否延遲；沒有寫入任何一筆時以寫入結束的時間（皆為校時後的時間）。"""
+        first = min((r.written_at for r in results if r.written_at is not None), default=None)
+        return self._is_late(first or datetime.fromtimestamp(prepared.clock.now(), TAIPEI))
+
+    def _is_late(self, at: datetime) -> bool:
+        return at - self._state.run_at > LATE_THRESHOLD
+
+    def _finish(self, started_at: datetime, requests, results, *, error: str | None, late: bool,
                 title: str, message: str) -> None:
         """結束這個週期並通知：無論紀錄是否寫入成功，都不可再執行一次，也一定要通知使用者。"""
         prepared = self._prepared
@@ -320,10 +342,11 @@ class AutomationService:
         self._cancel.clear()  # 寫入期間（開放時間後）的取消要求不再有意義
         try:
             self._store.append_run(RunRecord(
-                target_monday=self._state.target_monday, started_at=now, late=late,
+                target_monday=self._state.target_monday, started_at=started_at, late=late,
                 clock_source=prepared.sync.source.value if prepared else None,
                 clock_diff=prepared.clock_diff if prepared else None,
-                error=error, requests=tuple(requests), results=tuple(results)))
+                error=error, requests=tuple(requests), results=tuple(results),
+                snapshot_at=prepared.prepared_at if prepared else None))
         except Exception as e:
             log.exception("執行紀錄寫入失敗")
             message = f"{message}（紀錄寫入失敗：{describe_error(e)}）"

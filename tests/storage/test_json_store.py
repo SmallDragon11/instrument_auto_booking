@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from datetime import date, datetime, time
 
 import pytest
@@ -289,3 +290,16 @@ def test_unreadable_run_file_still_raises(tmp_path, monkeypatch, fast_retry):
     with pytest.raises(StoreError):
         store.load_runs()
     assert store.corrupt_runs() == []
+
+
+def test_snapshot_time_round_trips_and_old_records_have_none(tmp_path):
+    store = JsonStore(tmp_path)
+    snap = datetime(2026, 10, 9, 12, 50, 3, tzinfo=TAIPEI)
+    store.append_run(replace(record(datetime(2026, 10, 9, 13, 0, 1, tzinfo=TAIPEI)), snapshot_at=snap))
+    assert JsonStore(tmp_path).load_runs()[0].snapshot_at == snap
+    (path,) = (tmp_path / "runs").glob("*.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    del data["snapshot_at"]  # 舊版紀錄檔
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert JsonStore(tmp_path).load_runs()[0].snapshot_at is None
+    assert record(datetime(2026, 10, 9, 13, 0, 1, tzinfo=TAIPEI)).snapshot_at is None  # 預設值

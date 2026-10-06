@@ -1,3 +1,4 @@
+import logging
 import threading
 import time as time_module
 from datetime import date, datetime, time
@@ -33,10 +34,11 @@ def t(hh, mm, ss=0, day=9):
 class FakeRunner:
     """offset＝真實時間 − 本機時鐘（秒）；local_now 由 env 的 make() 接到測試用的本機時鐘。"""
 
-    def __init__(self, prepare_errors=(), run_result=OK, run_error=None, offset=0.0, while_waiting=()):
+    def __init__(self, prepare_errors=(), run_result=OK, run_error=None, offset=0.0, while_waiting=(),
+                 source=ClockSource.NTP):
         self.prepare_errors = list(prepare_errors)
         self.run_result, self.run_error = run_result, run_error
-        self.offset = offset
+        self.offset, self.source = offset, source
         self.local_now = time_module.time
         self.calls = []
         self.ran_with = []  # run 收到的 Prepared
@@ -47,7 +49,7 @@ class FakeRunner:
         self.calls.append(("prepare", tuple(requests)))
         if self.prepare_errors and (error := self.prepare_errors.pop(0)) is not None:  # None＝這次成功
             raise error
-        sync = ClockSync(ClockSource.NTP, self.offset)
+        sync = ClockSync(self.source, self.offset)
         return Prepared(Plan((), (), ()), sync, Clock(sync, lambda: self.local_now()), t(12, 50),
                         file_id_from_url(settings.spreadsheet_url))
 
@@ -683,3 +685,63 @@ def test_upcoming_matches_the_service(env):
     runner = FakeRunner()
     drive(make(runner), clock, [t(12, 50), t(12, 59)])
     assert upcoming(t(13, 30), SETTINGS, store) == (datetime(2026, 10, 16, 13, 0, tzinfo=TAIPEI), date(2026, 10, 19))
+
+
+# --- 紀錄：開始時間、延遲判斷、快照時間、校時來源 ---
+
+def test_record_started_at_is_when_the_write_job_starts(env):
+    store, clock, notes, make = env
+
+    class QueuedRunner(FakeRunner):
+        def run(self, prepared, settings, run_at, *, guard=None):
+            clock["now"] = t(12, 59, 20)  # 瀏覽器執行緒先做完排在前面的工作，job 才開始
+            return super().run(prepared, settings, run_at, guard=guard)
+    drive(make(QueuedRunner()), clock, [t(12, 50), t(12, 59)])
+    (record,) = store.load_runs()
+    assert record.started_at == t(12, 59, 20)
+
+
+def test_late_is_judged_by_the_first_actual_write(env):
+    store, clock, notes, make = env
+    slow = (ItemResult("a", ItemStatus.SUCCESS, written_at=t(13, 2)),)  # 例如瀏覽器當掉復原後才寫入
+    drive(make(FakeRunner(run_result=slow)), clock, [t(12, 50), t(12, 59)])
+    (record,) = store.load_runs()
+    assert record.late is True and record.started_at == t(12, 59)
+    assert notes.items == [("自動預約完成", "（延遲執行）1 成功")]
+
+
+def test_on_time_first_write_is_not_late_even_if_later_writes_are(env):
+    store, clock, notes, make = env
+    results = (ItemResult("a", ItemStatus.SUCCESS, written_at=t(13, 0, 1)),
+               ItemResult("b", ItemStatus.SUCCESS, written_at=t(13, 3)))
+    store.save_bookings(MON, [REQ, REQ2])
+    drive(make(FakeRunner(run_result=results)), clock, [t(12, 50), t(12, 59)])
+    assert store.load_runs()[0].late is False
+
+
+def test_late_without_writes_is_judged_by_when_the_run_ended(env):
+    store, clock, notes, make = env
+    conflict = (ItemResult("a", ItemStatus.LIVE_CONFLICT, reason="B10 已有「Ping」"),)
+    runner = FakeRunner(run_result=conflict, while_waiting=[lambda: clock.__setitem__("now", t(13, 1, 30))])
+    drive(make(runner), clock, [t(12, 50), t(12, 59)])
+    assert store.load_runs()[0].late is True
+
+
+def test_record_keeps_snapshot_time(env):
+    store, clock, notes, make = env
+    drive(make(FakeRunner()), clock, [t(12, 50), t(12, 59)])
+    assert store.load_runs()[0].snapshot_at == t(12, 50)  # Prepared.prepared_at
+
+
+def test_preflight_logs_clock_source_and_difference(env, caplog):
+    store, clock, notes, make = env
+    caplog.set_level(logging.INFO, logger="instrument_booking")
+    drive(make(FakeRunner()), clock, [t(12, 50)])
+    assert any("校時來源 NTP" in r.getMessage() and "時鐘差" in r.getMessage() for r in caplog.records)
+
+
+def test_completion_notice_warns_when_clock_was_not_synced(env):
+    store, clock, notes, make = env
+    drive(make(FakeRunner(source=ClockSource.LOCAL)), clock, [t(12, 50), t(12, 59)])
+    assert notes.items == [("自動預約完成", "1 成功（未能網路校時，使用本機時間＋3 秒餘量）")]
+    assert store.load_runs()[0].clock_source == "本機時間"
