@@ -18,6 +18,7 @@ RUN_AT = datetime(2026, 10, 9, 13, 0, tzinfo=TAIPEI)
 SETTINGS = Settings(name="Zoe", spreadsheet_url="https://docs.google.com/spreadsheets/d/FILEID/edit")
 REQ = BookingRequest("a", Instrument.TUBE_A, MON, 13, 15, "Ar", "A4C2F4")
 OK = (ItemResult("a", ItemStatus.SUCCESS),)
+SETTINGS_SAVED = datetime(2026, 9, 1, 9, 0, tzinfo=TAIPEI)  # 設定早已存在
 
 
 def t(hh, mm, ss=0, day=9):
@@ -57,7 +58,7 @@ class Notes:
 @pytest.fixture
 def env(tmp_path):
     store = JsonStore(tmp_path)
-    store.save_settings(SETTINGS)
+    store.save_settings(SETTINGS, now=SETTINGS_SAVED)
     store.save_bookings(MON, [REQ])
     clock = {"now": t(12, 0)}
     notes = Notes()
@@ -104,7 +105,7 @@ def test_failed_preflight_retries_at_t_minus_2_then_succeeds(env):
     drive(make(runner), clock, [t(12, 50), t(12, 55), t(12, 58), t(12, 59)])
     assert [c[0] for c in runner.calls] == ["prepare", "abandon", "prepare", "run"]
     assert notes.items[0][0] == "自動預約預檢失敗"
-    assert "重新登入" in notes.items[0][1] and "2 分鐘前會再試一次" in notes.items[0][1]
+    assert "重新登入" in notes.items[0][1] and "12:58 會再試一次" in notes.items[0][1]
     assert store.load_runs()[0].results == OK
 
 
@@ -141,10 +142,46 @@ def test_changing_run_time_resets_cycle(env):
     runner = FakeRunner()
     service = make(runner)
     drive(service, clock, [t(12, 50)])
-    store.save_settings(Settings(name="Zoe", spreadsheet_url=SETTINGS.spreadsheet_url, run_time=time(14, 0)))
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=SETTINGS.spreadsheet_url, run_time=time(14, 0)),
+                        now=t(12, 55))
     drive(service, clock, [t(12, 59)])
     assert service.state.run_at == datetime(2026, 10, 9, 14, 0, tzinfo=TAIPEI)
     assert service.state.preflight_attempts == 0
+
+
+def test_moving_schedule_earlier_does_not_catch_up(env):
+    # 週三 10:00 把週五改成週一：本週一 13:00（目標週＝MON）已過去，但不可立刻為 MON 那週寫入
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=SETTINGS.spreadsheet_url, run_weekday=0),
+                        now=t(10, 0, day=7))
+    drive(service, clock, [t(10, 0, 1, day=7), t(10, 5, day=7), t(13, 0, day=7)])
+    assert runner.calls == [] and store.load_runs() == []
+    assert service.state.run_at == datetime(2026, 10, 12, 13, 0, tzinfo=TAIPEI)  # 等下週一
+
+
+def test_cycle_before_first_settings_save_is_not_caught_up(tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_bookings(MON, [REQ])
+    store.save_settings(SETTINGS, now=t(13, 20))  # 第一次存設定時，週五 13:00 已經過去
+    runner = FakeRunner()
+    service = AutomationService(store=store, runner=runner, notifier=Notes(), now=lambda: t(13, 30))
+    service.step()
+    assert runner.calls == []
+    assert service.state.run_at == datetime(2026, 10, 16, 13, 0, tzinfo=TAIPEI)
+
+
+def test_failed_catch_up_preflight_retries_one_minute_later(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(prepare_errors=[NotLoggedIn("x")])
+    service = make(runner)
+    drive(service, clock, [t(13, 30), t(13, 30, 30), t(13, 30, 59)])
+    assert [c[0] for c in runner.calls] == ["prepare", "abandon"]  # 1 分鐘內不重試
+    assert service.state.retry_at == t(13, 31)
+    assert "13:31 會再試一次" in notes.items[0][1]
+    drive(service, clock, [t(13, 31), t(13, 31, 1)])
+    assert [c[0] for c in runner.calls] == ["prepare", "abandon", "prepare", "run"]
 
 
 def test_run_forever_survives_errors_and_stops():

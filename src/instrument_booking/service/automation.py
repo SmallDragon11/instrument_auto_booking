@@ -7,17 +7,19 @@ from __future__ import annotations
 import logging
 import threading
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Protocol, Sequence
 
 from instrument_booking.core.models import TAIPEI, BookingRequest, ItemResult, ItemStatus
 from instrument_booking.core.schedule import LATE_THRESHOLD
-from instrument_booking.service.cycle import Action, CycleState, current_run_at, next_action
+from instrument_booking.service.cycle import RETRY_LEAD, Action, CycleState, current_run_at, next_action
 from instrument_booking.service.housekeeping import LOGGER_NAME, describe_error
 from instrument_booking.service.settings import Settings, validate_settings
 from instrument_booking.storage.json_store import RunRecord
 
 log = logging.getLogger(LOGGER_NAME)
+
+RETRY_MIN_GAP = timedelta(minutes=1)  # 預檢失敗後至少隔多久才重試（補跑時避免連續失敗）
 
 STATUS_LABEL = {
     ItemStatus.SUCCESS: "成功",
@@ -62,7 +64,8 @@ class AutomationService:
             if validate_settings(settings):
                 return  # 尚未完成設定
             run_at = current_run_at(now, settings.run_weekday, settings.run_time, self._store.executed_weeks(),
-                                    lambda m: bool(self._store.load_bookings(m)))
+                                    lambda m: bool(self._store.load_bookings(m)),
+                                    catch_up_since=self._store.schedule_since())
             if self._state is None or self._state.run_at != run_at:
                 self._state, self._prepared, self._last_error = CycleState(run_at), None, None
             requests = self._store.load_bookings(self._state.target_monday)
@@ -94,7 +97,10 @@ class AutomationService:
             self._last_error = describe_error(e)
             log.warning("第 %d 次預檢失敗：%s", state.preflight_attempts, self._last_error)
             self._runner.abandon()
-            again = "，2 分鐘前會再試一次" if state.preflight_attempts == 1 else ""
+            again = ""
+            if state.preflight_attempts == 1:
+                state.retry_at = max(state.run_at - RETRY_LEAD, self._now() + RETRY_MIN_GAP)
+                again = f"，{state.retry_at:%H:%M} 會再試一次"
             self._notifier.notify("自動預約預檢失敗", f"{self._last_error}{again}")
 
     def _give_up(self, now: datetime, requests: list[BookingRequest]) -> None:
