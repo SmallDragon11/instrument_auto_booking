@@ -416,35 +416,85 @@ def settings_with(**changes):
     return Settings(**values)
 
 
-@pytest.mark.parametrize("change, reason", [
+@pytest.mark.parametrize("change, reason, message", [
     (lambda store: store.save_settings(settings_with(run_time=time(14, 0)), now=t(12, 59, 30)),
-     "自動預約時間已變更，取消本次寫入"),
+     "自動預約時間已變更，取消本次寫入", "自動預約時間已變更，將改在 10/09 14:00 預約"),
     (lambda store: store.save_settings(settings_with(run_weekday=3), now=t(12, 59, 30)),
-     "自動預約時間已變更，取消本次寫入"),
+     "自動預約時間已變更，取消本次寫入", "自動預約時間已變更，將改在 10/15 13:00 預約"),
     (lambda store: store.save_settings(settings_with(spreadsheet_url=NEW_URL), now=t(12, 59, 30)),
-     "預約表網址已變更，取消本次寫入"),
+     "預約表網址已變更，取消本次寫入", "預約表網址已變更，本次未寫入；將以新的預約表在 10/09 13:00 預約"),
     (lambda store: store.save_settings(settings_with(name=""), now=t(12, 59, 30)),
-     "設定無效，取消本次寫入"),
+     "設定無效，取消本次寫入", "設定已變更為無效，本次未寫入：請填寫要寫入表格的名字"),
 ], ids=["run_time", "weekday", "spreadsheet", "invalid"])
-def test_settings_changed_while_waiting_cancels_the_write(env, change, reason):
+def test_settings_changed_while_waiting_cancels_without_recording(env, change, reason, message):
+    # 因設定變更而取消：不是使用者放棄這一週，不記錄、不視為已執行，改依新設定預約
     store, clock, notes, make = env
     runner = FakeRunner(while_waiting=[lambda: None, lambda: change(store)])
     service = make(runner)
     drive(service, clock, [t(12, 50), t(12, 59)])
     assert runner.guard_results == [None, None, reason]  # 改變之後的下一次檢查就取消
-    (record,) = store.load_runs()
-    assert (record.error, record.results, record.requests) == (reason, (), (REQ,))
-    assert notes.items == [("自動預約已取消", f"{reason}（本週不會再自動執行）")]
-    assert service.state.finished
+    assert [c[0] for c in runner.calls] == ["prepare", "run", "abandon"]  # 關閉 Edge
+    assert store.load_runs() == [] and store.executed_weeks() == set()
+    assert notes.items == [("自動預約已延後", message)]
 
 
-def test_cancelled_week_is_not_run_again_at_the_new_time(env):
+def test_postponing_the_same_day_during_the_wait_books_at_the_new_time(env):
+    # 實驗室把開放時間從 13:00 延到 14:00：13:00 不寫入，改在 14:00 為同一週寫入
     store, clock, notes, make = env
     runner = FakeRunner(while_waiting=[
         lambda: store.save_settings(settings_with(run_time=time(14, 0)), now=t(12, 59, 30))])
     service = make(runner)
-    drive(service, clock, [t(12, 50), t(12, 59), t(13, 0), t(13, 50), t(13, 59), t(14, 0, 30)])
-    assert [c[0] for c in runner.calls] == ["prepare", "run"]  # 14:00 不再為同一週預檢或寫入
+    drive(service, clock, [t(12, 50), t(12, 59)])
+    assert store.load_runs() == []
+    assert notes.items == [("自動預約已延後", "自動預約時間已變更，將改在 10/09 14:00 預約")]
+    assert service.status() == ServiceStatus(ServicePhase.IDLE, last_error="自動預約時間已變更，取消本次寫入")
+    runner.while_waiting = []
+    drive(service, clock, [t(13, 0), t(13, 30), t(13, 49, 59)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run", "abandon"]  # 14:00 的 T−10 之前不做任何事
+    drive(service, clock, [t(13, 50), t(13, 58, 59)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run", "abandon", "prepare"]
+    drive(service, clock, [t(13, 59), t(14, 0, 30)])
+    assert runner.calls[-1] == ("run", t(14, 0))  # 依新的開放時間寫入（fire_at／guard 照常把關）
+    (record,) = store.load_runs()
+    assert (record.target_monday, record.started_at, record.results, record.error) == (MON, t(13, 59), OK, None)
+    assert notes.items[-1] == ("自動預約完成", "1 成功")
+
+
+def test_moving_the_schedule_earlier_during_the_wait_neither_writes_nor_catches_up(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(while_waiting=[
+        lambda: store.save_settings(settings_with(run_time=time(12, 30)), now=t(12, 59, 30))])
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 59), t(13, 0), t(13, 30)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run", "abandon"]  # 12:30 已過：不立即補跑
+    assert store.load_runs() == []
+    assert notes.items == [("自動預約已延後", "自動預約時間已變更，將改在 10/16 12:30 預約")]
+    assert service.state.run_at == datetime(2026, 10, 16, 12, 30, tzinfo=TAIPEI)
+
+
+def test_spreadsheet_changed_during_the_wait_rebooks_with_the_new_sheet(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(while_waiting=[
+        lambda: store.save_settings(settings_with(spreadsheet_url=NEW_URL), now=t(12, 59, 30))])
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 59)])
+    runner.while_waiting = []
+    drive(service, clock, [t(12, 59, 40), t(12, 59, 50)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run", "abandon", "prepare", "run"]
+    assert runner.ran_with[-1].file_id == "NEWID"
+    assert len(store.load_runs()) == 1
+
+
+def test_manually_cancelled_week_is_not_run_again_at_a_new_time(env):
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    runner.while_waiting = [service.cancel_current]
+    drive(service, clock, [t(12, 50), t(12, 59), t(13, 0)])
+    runner.while_waiting = []
+    store.save_settings(settings_with(run_time=time(14, 0)), now=t(13, 1))
+    drive(service, clock, [t(13, 1), t(13, 50), t(13, 59), t(14, 0, 30)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run"]  # 手動取消＝該週已執行，14:00 不再預約
     assert store.executed_weeks() == {MON}
     assert len(store.load_runs()) == 1
 

@@ -28,7 +28,8 @@ log = logging.getLogger(LOGGER_NAME)
 
 RETRY_MIN_GAP = timedelta(minutes=1)  # 預檢失敗後至少隔多久才重試（補跑時避免連續失敗）
 
-# 寫入前取消的原因（記錄於執行紀錄的 error）
+# 寫入前取消的原因。只有手動取消會記錄（error）並視為該週已執行；
+# 因設定變更而取消時不記錄，改依新設定預約
 CANCELLED_BY_USER = "已手動取消"
 CANCEL_SCHEDULE_CHANGED = "自動預約時間已變更，取消本次寫入"
 CANCEL_URL_CHANGED = "預約表網址已變更，取消本次寫入"
@@ -139,7 +140,7 @@ class AutomationService:
                 self._state, self._last_error = CycleState(run_at), None
                 self._cancel.clear()
             if not self._state.finished and self._state.target_monday in executed:
-                # 該週已有紀錄（例如寫入前被取消後改了時間）：每個目標週只自動執行一次
+                # 該週已有紀錄（例如手動取消後改了時間）：每個目標週只自動執行一次
                 self._state.finished = True
             if self._prepared is not None and file_id_from_url(settings.spreadsheet_url) != self._prepared.file_id:
                 self._discard_plan("預約表網址改變")
@@ -193,6 +194,10 @@ class AutomationService:
     def _publish(self, now: datetime, phase: ServicePhase | None = None) -> None:
         """依目前的週期狀態替換 status 快照；phase 指定進行中的階段（PREPARING、RUNNING）。"""
         state = self._state
+        if state is None:  # 因設定變更而延後：下一次 step 才依新設定排程
+            self._status = ServiceStatus(ServicePhase.IDLE, last_error=self._last_error,
+                                         service_error=self._service_error)
+            return
         if phase is None:
             if state.finished:
                 phase = ServicePhase.DONE
@@ -251,6 +256,41 @@ class AutomationService:
         log.warning("自動預約已取消：%s", reason)
         self._finish(now, requests, (), error=reason, late=late,
                      title="自動預約已取消", message=f"{reason}（本週不會再自動執行）")
+
+    def _postpone(self, reason: str) -> None:
+        """設定在寫入前改變而取消：不記錄、不視為已執行；關閉 Edge、通知，下一次 step 依新設定重新排程。
+
+        新的執行時間照常由 current_run_at（含 schedule_since 規則）決定，寫入照常由 fire_at／guard 把關，
+        所以不會早於新設定的開放時間，也不會因為把時間改早而立即補跑。
+        """
+        log.warning("設定在寫入前改變，本次不寫入、不記錄（%s）", reason)
+        self._prepared, self._planned = None, ()
+        self._state, self._last_error = None, reason
+        try:
+            self._runner.abandon()
+        finally:  # 關閉 Edge 失敗也要通知
+            self._notifier.notify("自動預約已延後", self._postponed_message(reason))
+
+    def _postponed_message(self, reason: str) -> str:
+        try:
+            settings = self._store.load_settings()
+            problems = validate_settings(settings)
+            if problems:
+                return f"設定已變更為無效，本次未寫入：{'；'.join(problems)}"
+            executed = self._store.executed_weeks()
+            run_at = _run_at(self._now(), settings, self._store, executed)
+        except Exception as e:
+            return f"{reason}（{describe_error(e)}）"
+        when = f"{run_at:%m/%d %H:%M}"
+        if reason == CANCEL_SCHEDULE_CHANGED:
+            message = f"自動預約時間已變更，將改在 {when} 預約"
+        elif reason == CANCEL_URL_CHANGED:
+            message = f"預約表網址已變更，本次未寫入；將以新的預約表在 {when} 預約"
+        else:
+            message = f"{reason.removesuffix('，取消本次寫入')}，本次未寫入；將在 {when} 預約"
+        if target_week(run_at) in executed:
+            message += "（該週已有執行紀錄，不會再自動預約）"
+        return message
 
     def _guard(self, settings: Settings, file_id: str, started: list[datetime]) -> Callable[[], str | None]:
         """寫入前的取消檢查（在瀏覽器執行緒呼叫）：回傳取消原因或 None。
@@ -313,7 +353,10 @@ class AutomationService:
         try:
             results = self._runner.run(prepared, settings, state.run_at, guard=guard)
         except RunCancelled as e:
-            self._cancelled(self._started(started, now), requests, str(e), late=self._ended_late(prepared, ()))
+            if str(e) == CANCELLED_BY_USER:
+                self._cancelled(self._started(started, now), requests, str(e), late=self._ended_late(prepared, ()))
+            else:
+                self._postpone(str(e))
             return
         except Exception as e:
             error = describe_error(e)
