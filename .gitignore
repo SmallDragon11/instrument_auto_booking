@@ -27,3 +27,6 @@ service_account*.json
 
 # spike 輸出（可能含實驗室成員名字）
 spike/output/
+
+# Python 套件建置產物
+*.egg-info/

@@ -1,8 +1,0 @@
-pyproject.toml
-src/instrument_booking/__init__.py
-src/instrument_booking.egg-info/PKG-INFO
-src/instrument_booking.egg-info/SOURCES.txt
-src/instrument_booking.egg-info/dependency_links.txt
-src/instrument_booking.egg-info/requires.txt
-src/instrument_booking.egg-info/top_level.txt
-src/instrument_booking/core/__init__.py
