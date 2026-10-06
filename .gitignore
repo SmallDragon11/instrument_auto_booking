@@ -21,3 +21,6 @@ service_account*.json
 
 # 本機測試資料（實驗室真實預約資料，不提交）
 *.xlsx
+
+# 腦力激盪視覺輔助暫存
+.superpowers/
