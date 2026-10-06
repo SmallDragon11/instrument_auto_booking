@@ -19,6 +19,7 @@ RUN_AT = datetime(2026, 10, 9, 13, 0, tzinfo=TAIPEI)
 SETTINGS = Settings(name="Zoe", spreadsheet_url="https://docs.google.com/spreadsheets/d/FILEID/edit")
 REQ = BookingRequest("a", Instrument.TUBE_A, MON, 13, 15, "Ar", "A4C2F4")
 REQ2 = BookingRequest("b", Instrument.TUBE_B, MON, 9, 11, "Ar", "A4C2F4")
+REQ3 = BookingRequest("c", Instrument.TUBE_C, MON, 9, 10, "Ar", "A4C2F4")
 NEW_URL = "https://docs.google.com/spreadsheets/d/NEWID/edit"
 OK = (ItemResult("a", ItemStatus.SUCCESS),)
 SETTINGS_SAVED = datetime(2026, 9, 1, 9, 0, tzinfo=TAIPEI)  # 設定早已存在
@@ -43,8 +44,8 @@ class FakeRunner:
 
     def prepare(self, settings, requests):
         self.calls.append(("prepare", tuple(requests)))
-        if self.prepare_errors:
-            raise self.prepare_errors.pop(0)
+        if self.prepare_errors and (error := self.prepare_errors.pop(0)) is not None:  # None＝這次成功
+            raise error
         sync = ClockSync(ClockSource.NTP, self.offset)
         return Prepared(Plan((), (), ()), sync, Clock(sync, lambda: self.local_now()), t(12, 50),
                         file_id_from_url(settings.spreadsheet_url))
@@ -308,11 +309,9 @@ def test_plan_discarded_by_empty_list_is_prepared_again_when_list_returns(env):
 
 def test_record_keeps_the_requests_that_were_planned(env):
     store, clock, notes, make = env
-    runner = FakeRunner()
+    runner = FakeRunner(while_waiting=[lambda: store.save_bookings(MON, [REQ, REQ2])])  # 寫入開始後才新增
     service = make(runner)
-    drive(service, clock, [t(12, 50)])
-    store.save_bookings(MON, [REQ, REQ2])  # 預檢之後才新增
-    drive(service, clock, [t(12, 59)])
+    drive(service, clock, [t(12, 50), t(12, 59)])
     assert [c[0] for c in runner.calls] == ["prepare", "run"]
     (record,) = store.load_runs()
     assert record.requests == (REQ,)
@@ -525,3 +524,43 @@ def test_cancel_current_does_not_block_while_step_holds_the_lock(env):
     drive(service, clock, [t(12, 50), t(12, 59)])
     assert done.is_set()
     assert store.load_runs()[0].error == "已手動取消"
+
+
+# --- 預檢後清單被修改：重新預檢（保留待命的 Edge）---
+
+def test_deleting_a_request_after_preflight_replans_without_closing_edge(env):
+    store, clock, notes, make = env
+    store.save_bookings(MON, [REQ, REQ2])
+    runner = FakeRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 52)])
+    store.save_bookings(MON, [REQ])
+    drive(service, clock, [t(12, 55), t(12, 56), t(12, 59)])
+    assert runner.calls == [("prepare", (REQ, REQ2)), ("prepare", (REQ,)), ("run", RUN_AT)]  # 沒有 abandon
+    (record,) = store.load_runs()
+    assert record.requests == (REQ,)
+
+
+@pytest.mark.parametrize("new_list", [[REQ2, REQ], [REQ, REQ2, REQ3]], ids=["reordered", "added"])
+def test_reordering_or_adding_after_preflight_replans(env, new_list):
+    store, clock, notes, make = env
+    store.save_bookings(MON, [REQ, REQ2])
+    runner = FakeRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    store.save_bookings(MON, new_list)
+    drive(service, clock, [t(12, 55), t(12, 59)])
+    assert runner.calls == [("prepare", (REQ, REQ2)), ("prepare", tuple(new_list)), ("run", RUN_AT)]
+    assert store.load_runs()[0].requests == tuple(new_list)
+
+
+def test_replanning_does_not_use_up_the_retry(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(prepare_errors=[None, NotLoggedIn("x")])  # 第一次成功、重新預檢失敗
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    store.save_bookings(MON, [REQ, REQ2])
+    drive(service, clock, [t(12, 55), t(12, 56), t(12, 58), t(12, 59)])
+    assert [c[0] for c in runner.calls] == ["prepare", "prepare", "abandon", "prepare", "run"]
+    assert "12:58 會再試一次" in notes.items[0][1]  # 仍有一次重試，不是直接放棄
+    assert store.load_runs()[0].results == OK

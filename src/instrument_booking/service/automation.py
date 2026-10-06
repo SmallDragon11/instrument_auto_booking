@@ -100,6 +100,9 @@ class AutomationService:
             if not requests:
                 self._discard_plan("預約清單被清空")
                 return
+            if self._prepared is not None and tuple(requests) != self._planned:
+                # 規劃依據的清單（順序＝優先序）已不是目前的清單：重新預檢；待命的 Edge 留給新的預檢沿用
+                self._discard_plan("預約清單在預檢後被修改", close_edge=False)
             if self._prepared is not None:
                 # 已校時：寫入的時機、是否延遲、開始時間一律以校時後的時間判斷（本機時鐘可能偏慢）
                 now = datetime.fromtimestamp(self._prepared.clock.now(), TAIPEI)
@@ -133,8 +136,11 @@ class AutomationService:
         except Exception:
             log.exception("無法顯示通知")
 
-    def _discard_plan(self, reason: str) -> None:
-        """放棄已準備好的規劃並關閉待命的 Edge；之後（例如清單恢復時）可重新預檢。"""
+    def _discard_plan(self, reason: str, *, close_edge: bool = True) -> None:
+        """放棄已準備好的規劃；之後（例如清單恢復時）可重新預檢，且不計入失敗重試。
+
+        close_edge=False：保留待命的 Edge（仍是保留中），讓立刻進行的重新預檢沿用。
+        """
         if self._prepared is None:
             return
         log.info("丟棄已準備的規劃（%s）", reason)
@@ -143,7 +149,8 @@ class AutomationService:
             self._state.plan_ready = False
             self._state.preflight_attempts = 0
             self._state.retry_at = None
-        self._runner.abandon()
+        if close_edge:
+            self._runner.abandon()
 
     def _cancel_cycle(self, now: datetime, requests: list[BookingRequest]) -> bool:
         """處理使用者的取消：T−10 之後、尚未結束的週期 → 關閉待命的 Edge、記錄並通知；否則忽略。"""

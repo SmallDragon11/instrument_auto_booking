@@ -178,3 +178,20 @@ def test_guard_is_checked_every_tick_until_opening_time_but_never_after(tmp_path
     assert len(guard.calls) > 600 / 0.05  # 等待期間每個刻度都檢查
     assert len(page.pasted) == 1 and set(guard.pasted_before) == {0}  # 開放時間到了之後（寫入、驗證等待）不再檢查
     assert clock.t > 1000.0 + 600 + 4.9  # 有經過寫入後的 5 秒驗證等待
+
+
+def test_preparing_again_reuses_the_standby_edge(tmp_path):
+    # 預檢後清單被修改 → 服務不關閉 Edge、直接重新預檢：沿用保留中的同一個 session
+    wb = new_workbook()
+    add_tube_sheet(wb, "202610", MON)
+    log = []
+    worker = BrowserWorker(lambda: FakeSession(log, request=XlsxRequest(wb)))
+    try:
+        runner = BookingRunner(worker, snapshot_dir=tmp_path / "snap",
+                               sync=lambda: ClockSync(ClockSource.NTP, (T0 - 600) - 1000.0),
+                               local_now=lambda: 1000.0)
+        runner.prepare(SETTINGS, [REQ])
+        runner.prepare(SETTINGS, [])
+        assert [e for e, _ in log] == ["start"]
+    finally:
+        worker.shutdown()
