@@ -1,8 +1,10 @@
 from datetime import date, datetime
 
+import pytest
 from openpyxl.utils import get_column_letter, range_boundaries
 
 from instrument_booking.core.job import (
+    EarlyWriteError,
     WriterCrashed,
     WriterError,
     execute,
@@ -42,7 +44,10 @@ class FakeWriter:
         self.before_read = None   # fn(writer, sheet, a1, nth_read)
         self.after_paste = None   # fn(writer, sheet, a1)
         self.fail_paste = {}      # a1 -> 例外（貼上前拋出）
-        self.crash_after_paste = set()  # a1：貼上成功後拋出 WriterCrashed
+        self.crash_after_paste = set()  # a1：貼上成功後拋出 WriterCrashed（僅一次）
+        self.fail_prewarm = None  # 預熱時拋出的例外
+        self.fail_recover = None  # recover() 時拋出的例外
+        self.on_recover = None    # fn(writer)：recover() 成功時呼叫
         self.reads = 0
 
     @staticmethod
@@ -52,6 +57,8 @@ class FakeWriter:
 
     def prewarm(self, sheets):
         self.log.append(("prewarm", tuple(sheets)))
+        if self.fail_prewarm:
+            raise self.fail_prewarm
 
     def read_range(self, sheet, a1):
         self.reads += 1
@@ -70,10 +77,15 @@ class FakeWriter:
         if self.after_paste:
             self.after_paste(self, sheet, a1)
         if a1 in self.crash_after_paste:
+            self.crash_after_paste.discard(a1)
             raise WriterCrashed("瀏覽器當掉")
 
     def recover(self):
         self.log.append(("recover",))
+        if self.fail_recover:
+            raise self.fail_recover
+        if self.on_recover:
+            self.on_recover(self)
 
 
 def pw(id, col, first, last, color="A4C2F4", inst=Instrument.TUBE_A, start=13, end=17, warning=None):
@@ -203,13 +215,190 @@ def test_crash_after_paste_is_verified_as_success():
     assert r.status is ItemStatus.SUCCESS
 
 
-def test_crash_before_paste_is_failed():
+def pastes(w):
+    return [e for e in w.log if e[0] == "paste"]
+
+
+def test_crash_before_paste_recovers_and_retries():
     clock = FakeClock(T0 - 60)
     writer = FakeWriter(clock)
     writer.fail_paste["B10:B13"] = WriterCrashed("瀏覽器當掉")
     (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert w.log.count(("recover",)) == 1
+    assert r.status is ItemStatus.SUCCESS
+    assert len(pastes(w)) == 1 and pastes(w)[0][2] >= T0
+    assert w.cells[("202610", "B10")] == CellState(NAME, "A4C2F4")
+
+
+def test_unknown_paste_exception_is_treated_as_crash_and_retried():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_paste["B10:B13"] = RuntimeError("未預期的錯誤")
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
     assert ("recover",) in w.log
-    assert r.status is ItemStatus.FAILED
+    assert r.status is ItemStatus.SUCCESS
+    assert len(pastes(w)) == 1
+
+
+@pytest.mark.parametrize("exc", [WriterCrashed("當掉"), RuntimeError("未知")])
+def test_first_read_crash_recovers_and_retries(exc):
+    def crash_first(w, sheet, a1, n):
+        if n == 1:
+            raise exc
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.before_read = crash_first
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert w.log.count(("recover",)) == 1
+    assert r.status is ItemStatus.SUCCESS
+    assert len(pastes(w)) == 1
+
+
+def test_crash_after_paste_retry_sees_own_booking_and_overlap_is_self_overlap():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.crash_after_paste.add("B10:B13")
+    # b（15–19，B12:B15）與 a（13–17）重疊；a 貼上後才當掉，但貼上其實已生效
+    results, w, _ = run([pw("a", 2, 10, 13), pw("b", 2, 12, 15, start=15, end=19)], writer, clock)
+    assert [r.status for r in results] == [ItemStatus.SUCCESS, ItemStatus.SELF_OVERLAP]
+    assert "a" in results[1].reason
+    assert len(pastes(w)) == 1  # 已寫入的不重寫
+
+
+def test_crash_again_on_retry_is_left_to_verification_without_more_retries():
+    def crash_twice(w, sheet, a1, n):
+        if n in (1, 2):
+            raise WriterCrashed("當掉")
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.before_read = crash_twice
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert w.log.count(("recover",)) == 2
+    assert writer.reads == 3  # 第一次＋重試＋驗證，不再重試
+    assert not pastes(w)
+    assert r.status is ItemStatus.FAILED and "寫入未完成" in r.reason
+
+
+def test_crash_again_on_retry_after_effective_paste_is_verified_success():
+    def crash_on_retry_read(w, sheet, a1, n):
+        if n == 2:
+            raise RuntimeError("未知")
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.crash_after_paste.add("B10:B13")
+    writer.before_read = crash_on_retry_read
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert w.log.count(("recover",)) == 2
+    assert len(pastes(w)) == 1
+    assert r.status is ItemStatus.SUCCESS and r.written_at is None  # 貼上時間不確定
+
+
+def test_short_read_on_retry_never_pastes():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_paste["B10:B13"] = WriterCrashed("當掉")
+    original = writer.read_range
+    calls = []
+
+    def read(sheet, a1):
+        calls.append(a1)
+        return [] if len(calls) == 2 else original(sheet, a1)
+    writer.read_range = read
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert len(calls) == 3  # 第一次＋重試＋驗證
+    assert not pastes(w)
+    assert r.status is ItemStatus.FAILED and "得到 0 格" in r.reason
+
+
+def test_retry_after_recover_still_refuses_early_write():
+    def jump_back(w):
+        w.clock.t = T0 - 10  # 復原期間系統時間被校正
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_paste["B10:B13"] = WriterCrashed("當掉")
+    writer.on_recover = jump_back
+    results, w, _ = run([pw("a", 2, 10, 13), pw("b", 3, 10, 13, inst=Instrument.TUBE_B)], writer, clock)
+    assert not pastes(w)
+    assert [r.status for r in results] == [ItemStatus.FAILED, ItemStatus.FAILED]
+    assert all("時間未到" in r.reason for r in results)
+
+
+def test_writer_side_early_write_refusal_aborts_remaining_writes():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_paste["B10:B13"] = EarlyWriteError("寫入器：時間未到，拒絕貼上")
+    results, w, _ = run([pw("a", 2, 10, 13), pw("b", 3, 10, 13, inst=Instrument.TUBE_B)], writer, clock)
+    assert not pastes(w)
+    assert ("recover",) not in w.log
+    assert [r.status for r in results] == [ItemStatus.FAILED, ItemStatus.FAILED]
+    assert all("時間未到" in r.reason for r in results)
+
+
+def test_recover_failure_keeps_earlier_success_and_fails_the_rest():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_paste["C10:C13"] = WriterCrashed("當掉")
+    writer.fail_recover = RuntimeError("Edge 無法啟動")
+    results, w, _ = run([pw("a", 2, 10, 13),
+                         pw("b", 3, 10, 13, inst=Instrument.TUBE_B),
+                         pw("c", 4, 10, 13, inst=Instrument.TUBE_C)], writer, clock)
+    assert [r.status for r in results] == [ItemStatus.SUCCESS, ItemStatus.FAILED, ItemStatus.FAILED]
+    assert all("瀏覽器無法復原" in r.reason and "Edge 無法啟動" in r.reason for r in results[1:])
+    assert [e[1] for e in pastes(w)] == ["B10:B13"]
+
+
+def test_dead_browser_still_reports_every_item():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.crash_after_paste.add("C10:C13")
+    writer.fail_recover = RuntimeError("Edge 無法啟動")
+
+    def dead(w, sheet, a1, n):
+        if ("recover",) in w.log:
+            raise WriterCrashed("瀏覽器已關閉")
+    writer.before_read = dead
+    results, w, _ = run([pw("a", 2, 10, 13),
+                         pw("b", 3, 10, 13, inst=Instrument.TUBE_B),
+                         pw("c", 4, 10, 13, inst=Instrument.TUBE_C)], writer, clock)
+    assert [r.request_id for r in results] == ["a", "b", "c"]
+    a, b, c = results
+    assert a.status is ItemStatus.SUCCESS and "無法驗證" in a.warning  # 已貼上的仍回報成功
+    assert b.status is ItemStatus.FAILED and "瀏覽器無法復原" in b.reason and "無法確認" in b.reason
+    assert c.status is ItemStatus.FAILED and "瀏覽器無法復原" in c.reason
+
+
+@pytest.mark.parametrize("exc,recovers", [
+    (WriterError("逾時"), False), (WriterCrashed("當掉"), True), (RuntimeError("未知"), True)])
+def test_prewarm_failure_does_not_stop_writes(exc, recovers):
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_prewarm = exc
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert (("recover",) in w.log) is recovers
+    assert r.status is ItemStatus.SUCCESS
+
+
+def test_prewarm_crash_with_failed_recover_fails_all_without_raising():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.fail_prewarm = WriterCrashed("當掉")
+    writer.fail_recover = WriterCrashed("Edge 無法啟動")
+    results, w, _ = run([pw("a", 2, 10, 13), pw("b", 3, 10, 13, inst=Instrument.TUBE_B)], writer, clock)
+    assert [r.status for r in results] == [ItemStatus.FAILED, ItemStatus.FAILED]
+    assert all("瀏覽器無法復原" in r.reason for r in results)
+    assert not pastes(w)
+
+
+def test_unknown_exception_on_verification_keeps_success_with_warning():
+    def fail_on_verify(w, sheet, a1, n):
+        if n == 2:
+            raise RuntimeError("未知")
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.before_read = fail_on_verify
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert ("recover",) in w.log
+    assert r.status is ItemStatus.SUCCESS and "無法驗證" in r.warning
 
 
 def test_clock_jump_backwards_aborts_remaining_writes():
