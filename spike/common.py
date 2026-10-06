@@ -59,6 +59,33 @@ def jump(page, ref: str) -> float:
     return time.perf_counter() - t0
 
 
+def name_box(page) -> str:
+    return page.locator("#t-name-box").input_value()
+
+
+def copy_range(page, ref: str, rows: int, timeout: float = 3.0) -> tuple[str, float]:
+    """安全版：跳轉後確認名稱方塊與 HTML 列數都正確才回傳；否則重試，逾時拋出例外。"""
+    import re
+    t0 = time.perf_counter()
+    expected_box = ref.split("!")[-1]
+    while time.perf_counter() - t0 < timeout:
+        page.evaluate(WRITE_JS, ["", ""])
+        jump(page, ref)
+        if name_box(page) != expected_box:
+            page.wait_for_timeout(100)
+            continue
+        page.keyboard.press("Control+C")
+        for _ in range(20):
+            html = page.evaluate(READ_HTML_JS)
+            if html:
+                break
+            page.wait_for_timeout(30)
+        if html and "<table" in html and len(re.findall(r"<tr\b", html)) == rows:
+            return html, time.perf_counter() - t0
+        page.wait_for_timeout(150)
+    raise RuntimeError(f"無法正確讀取 {ref}（名稱方塊：{name_box(page)}）")
+
+
 def copy_html(page, ref: str, timeout: float = 2.0) -> tuple[str | None, float]:
     """選取範圍 → Ctrl+C → 讀剪貼簿 HTML。回傳 (html, 總耗時)。"""
     t0 = time.perf_counter()
