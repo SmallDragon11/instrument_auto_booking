@@ -18,7 +18,7 @@ def record(started, monday=MON, error=None):
         ItemResult("b", ItemStatus.LIVE_CONFLICT, reason="C5 已有「Ping」"),
     )
     return RunRecord(target_monday=monday, started_at=started, late=False, clock_source="NTP", clock_diff=0.61,
-                     preflight_error=error, requests=(TUBE, OVEN), results=results)
+                     error=error, requests=(TUBE, OVEN), results=results)
 
 
 def test_settings_default_when_missing(tmp_path):
@@ -92,3 +92,59 @@ def test_corrupted_legend_raises_store_error(tmp_path):
     (tmp_path / "legend.json").write_text('["不是物件"]', encoding="utf-8")
     with pytest.raises(StoreError, match="legend.json"):
         JsonStore(tmp_path).load_legend()
+
+
+def test_run_error_field_is_named_error_and_old_name_still_loads(tmp_path):
+    store = JsonStore(tmp_path)
+    store.append_run(record(datetime(2026, 10, 9, 13, 0, 1, tzinfo=TAIPEI), error="預檢失敗"))
+    (path,) = (tmp_path / "runs").glob("*.json")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["error"] == "預檢失敗" and "preflight_error" not in data
+    data["preflight_error"] = data.pop("error")  # 舊版紀錄檔
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    assert JsonStore(tmp_path).load_runs()[0].error == "預檢失敗"
+
+
+SAVED_AT = datetime(2026, 10, 7, 10, 0, tzinfo=TAIPEI)
+
+
+def test_schedule_since_recorded_on_first_save(tmp_path):
+    store = JsonStore(tmp_path)
+    assert store.schedule_since() is None
+    store.save_settings(Settings(name="Zoe"), now=SAVED_AT)
+    assert JsonStore(tmp_path).schedule_since() == SAVED_AT
+    assert JsonStore(tmp_path).load_settings() == Settings(name="Zoe")  # 不屬於 Settings
+
+
+def test_schedule_since_changes_only_when_weekday_or_time_changes(tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe"), now=SAVED_AT)
+    later = datetime(2026, 10, 8, 9, 0, tzinfo=TAIPEI)
+    store.save_settings(Settings(name="小融", theme="dark"), now=later)  # 星期與時間不變
+    assert store.schedule_since() == SAVED_AT
+    store.save_settings(Settings(name="小融", run_weekday=0), now=later)
+    assert store.schedule_since() == later
+    even_later = datetime(2026, 10, 9, 9, 0, tzinfo=TAIPEI)
+    store.save_settings(Settings(name="小融", run_weekday=0, run_time=time(12, 30)), now=even_later)
+    assert store.schedule_since() == even_later
+
+
+def test_schedule_since_defaults_to_now_in_taipei(tmp_path):
+    store = JsonStore(tmp_path)
+    before = datetime.now(TAIPEI)
+    store.save_settings(Settings(name="Zoe"))
+    since = store.schedule_since()
+    assert since.tzinfo is not None and before <= since <= datetime.now(TAIPEI)
+
+
+def test_corrupted_settings_file_counts_as_schedule_change(tmp_path):
+    (tmp_path / "settings.json").write_text("{not json", encoding="utf-8")
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe"), now=SAVED_AT)
+    assert store.schedule_since() == SAVED_AT
+
+
+def test_corrupted_schedule_since_raises_store_error(tmp_path):
+    (tmp_path / "settings.json").write_text('{"name": "Zoe", "schedule_since": "昨天"}', encoding="utf-8")
+    with pytest.raises(StoreError, match="settings.json"):
+        JsonStore(tmp_path).schedule_since()

@@ -8,7 +8,7 @@ from datetime import date, datetime, time
 from pathlib import Path
 from typing import Sequence
 
-from instrument_booking.core.models import BookingRequest, Instrument, ItemResult, ItemStatus
+from instrument_booking.core.models import TAIPEI, BookingRequest, Instrument, ItemResult, ItemStatus, to_taipei
 from instrument_booking.service.settings import Settings
 
 
@@ -24,7 +24,7 @@ class RunRecord:
     late: bool
     clock_source: str | None
     clock_diff: float | None           # 真實時間 − 本機系統時鐘（秒）
-    preflight_error: str | None
+    error: str | None                  # 預檢或寫入階段的錯誤（成功時為 None）
     requests: tuple[BookingRequest, ...]
     results: tuple[ItemResult, ...]
 
@@ -56,16 +56,22 @@ def result_from_dict(d: dict) -> ItemResult:
 
 def run_to_dict(r: RunRecord) -> dict:
     return {"target_monday": r.target_monday.isoformat(), "started_at": r.started_at.isoformat(), "late": r.late,
-            "clock_source": r.clock_source, "clock_diff": r.clock_diff, "preflight_error": r.preflight_error,
+            "clock_source": r.clock_source, "clock_diff": r.clock_diff, "error": r.error,
             "requests": [request_to_dict(q) for q in r.requests], "results": [result_to_dict(x) for x in r.results]}
 
 
 def run_from_dict(d: dict) -> RunRecord:
     return RunRecord(target_monday=date.fromisoformat(d["target_monday"]),
                      started_at=datetime.fromisoformat(d["started_at"]), late=d["late"],
-                     clock_source=d["clock_source"], clock_diff=d["clock_diff"], preflight_error=d["preflight_error"],
+                     clock_source=d["clock_source"], clock_diff=d["clock_diff"],
+                     error=d["error"] if "error" in d else d["preflight_error"],  # 相容舊版欄位名稱
                      requests=tuple(request_from_dict(q) for q in d["requests"]),
                      results=tuple(result_from_dict(x) for x in d["results"]))
+
+
+# settings.json 中不屬於 Settings 的欄位：自動預約的星期或時間最後一次被設定的時間（台北時間）。
+# 早於此時間的週期不補跑，避免使用者把時間改早時立即為下一週寫入（等同偷跑）。
+SCHEDULE_SINCE = "schedule_since"
 
 
 def settings_to_dict(s: Settings) -> dict:
@@ -91,8 +97,29 @@ class JsonStore:
         data = self._read(self.root / "settings.json")
         return Settings() if data is None else self._convert(settings_from_dict, data, "settings.json")
 
-    def save_settings(self, s: Settings) -> None:
-        self._write(self.root / "settings.json", settings_to_dict(s))
+    def save_settings(self, s: Settings, now: datetime | None = None) -> None:
+        """星期或時間與已存的不同（含第一次存檔、舊檔損毀）時，把 schedule_since 設為現在。"""
+        path = self.root / "settings.json"
+        data = settings_to_dict(s)
+        try:
+            old = self._read(path)
+            old_settings = None if old is None else settings_from_dict(old)
+        except (StoreError, KeyError, TypeError, ValueError, AttributeError):
+            old, old_settings = None, None
+        if old_settings is None or (old_settings.run_weekday, old_settings.run_time) != (s.run_weekday, s.run_time):
+            data[SCHEDULE_SINCE] = to_taipei(now or datetime.now(TAIPEI)).isoformat()
+        elif SCHEDULE_SINCE in old:
+            data[SCHEDULE_SINCE] = old[SCHEDULE_SINCE]
+        self._write(path, data)
+
+    def schedule_since(self) -> datetime | None:
+        """自動預約的星期或時間最後一次被設定的時間；從未記錄時為 None。"""
+        data = self._read(self.root / "settings.json")
+        if data is None:
+            return None
+        return self._convert(lambda d: to_taipei(datetime.fromisoformat(d[SCHEDULE_SINCE]))
+                             if SCHEDULE_SINCE in d and d[SCHEDULE_SINCE] is not None else None,
+                             data, "settings.json")
 
     # --- 預約清單（每個目標週一個檔，清單順序＝優先序）---
     def load_bookings(self, monday: date) -> list[BookingRequest]:

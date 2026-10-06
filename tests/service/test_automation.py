@@ -114,7 +114,7 @@ def test_two_failed_preflights_give_up_and_record_error(env):
     drive(make(runner), clock, [t(12, 50), t(12, 58), t(12, 58, 1), t(13, 0)])
     assert [c[0] for c in runner.calls] == ["prepare", "abandon", "prepare", "abandon"]
     (record,) = store.load_runs()
-    assert "重新登入" in record.preflight_error and record.results == ()
+    assert "重新登入" in record.error and record.results == ()
     assert notes.items[-1][0] == "自動預約未執行"
 
 
@@ -123,7 +123,7 @@ def test_execute_failure_is_recorded(env):
     runner = FakeRunner(run_error=RuntimeError("worker 掛了"))
     drive(make(runner), clock, [t(12, 50), t(12, 59)])
     (record,) = store.load_runs()
-    assert "RuntimeError" in record.preflight_error
+    assert "RuntimeError" in record.error
     assert notes.items[-1][0] == "自動預約失敗"
 
 

@@ -122,6 +122,6 @@ class AutomationService:
             target_monday=self._state.target_monday, started_at=now, late=late,
             clock_source=prepared.sync.source.value if prepared else None,
             clock_diff=prepared.clock_diff if prepared else None,
-            preflight_error=error, requests=tuple(requests), results=tuple(results)))
+            error=error, requests=tuple(requests), results=tuple(results)))
         self._state.finished = True
         self._prepared = None
