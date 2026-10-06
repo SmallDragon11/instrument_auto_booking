@@ -1,6 +1,5 @@
 from datetime import date, datetime
 
-import pytest
 from openpyxl.utils import get_column_letter, range_boundaries
 
 from instrument_booking.core.job import (
@@ -149,6 +148,41 @@ def test_suspected_clash_when_overwritten_before_verification():
     (r,), _, _ = run([pw("a", 2, 10, 13)], writer, clock)
     assert r.status is ItemStatus.SUSPECTED_CLASH
     assert "Rolling" in r.reason
+
+
+def test_same_colour_overwrite_inside_range_is_suspected_clash():
+    def paste_over_tail(w, sheet, a1):
+        w.cells[("202610", "B12")] = CellState("Rolling", "A4C2F4")  # 別人用同一氣體色貼進我們範圍後段
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.after_paste = paste_over_tail
+    (r,), _, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert r.status is ItemStatus.SUSPECTED_CLASH
+    assert r.reason == "驗證時 B12 有「Rolling」"
+
+
+def test_short_read_never_pastes():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    writer.read_range = lambda sheet, a1: []  # 例如剪貼簿解析失敗
+    (r,), w, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert r.status is ItemStatus.FAILED
+    assert "為安全起見不寫入" in r.reason
+    assert not [e for e in w.log if e[0] == "paste"]
+
+
+def test_short_read_on_verification_is_unverified_success():
+    clock = FakeClock(T0 - 60)
+    writer = FakeWriter(clock)
+    original = writer.read_range
+    calls = []
+
+    def read(sheet, a1):
+        calls.append(a1)
+        return original(sheet, a1) if len(calls) == 1 else []
+    writer.read_range = read
+    (r,), _, _ = run([pw("a", 2, 10, 13)], writer, clock)
+    assert r.status is ItemStatus.SUCCESS and "無法驗證" in r.warning
 
 
 def test_writer_error_fails_item_and_continues():

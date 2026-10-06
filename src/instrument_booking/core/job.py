@@ -9,7 +9,7 @@ import openpyxl
 
 from instrument_booking.core.models import TAIPEI, BookingRequest, CellFont, CellState, ItemResult, ItemStatus
 from instrument_booking.core.planner import Plan, PlannedWrite, describe_busy, make_plan
-from instrument_booking.core.sheet_locator import SheetIndex
+from instrument_booking.core.sheet_locator import SheetIndex, Target
 
 
 class SnapshotSource(Protocol):
@@ -40,7 +40,7 @@ class EarlyWriteError(Exception):
     """時間未到卻要寫入（偷跑防護）。"""
 
 
-def load_snapshot(path: Path):
+def load_snapshot(path: Path) -> tuple[openpyxl.Workbook, SheetIndex]:
     wb = openpyxl.load_workbook(path, data_only=True)
     return wb, SheetIndex.build(wb)
 
@@ -59,14 +59,18 @@ def _is_ours(cells: Sequence[CellState], name: str, color: str) -> bool:
     return (
         bool(cells)
         and str(cells[0].value or "").strip() == name.strip()
+        and all(c.value in (None, "") for c in cells[1:])
         and all(c.color == color for c in cells)
     )
 
 
-def _clash_reason(cells: Sequence[CellState], name: str) -> str:
+def _clash_reason(target: Target, cells: Sequence[CellState], name: str) -> str:
     first = str(cells[0].value or "").strip() if cells else ""
     if first != name.strip():
         return f"驗證時第一格為「{first}」" if first else "驗證時第一格是空的"
+    for row, cell in zip(target.rows[1:], cells[1:]):
+        if cell.value not in (None, ""):
+            return f"驗證時 {target.cell_name(row)} 有「{cell.value}」"
     return "驗證時底色不符"
 
 
@@ -103,7 +107,12 @@ def execute(plan: Plan, writer: SheetWriter, name: str, clock: TimeSource, not_b
             results[req.id] = ItemResult(req.id, ItemStatus.SELF_OVERLAP, reason=f"與已成功寫入的 {clash.id} 重疊")
             continue
         try:
-            busy = describe_busy(t, writer.read_range(t.sheet, t.a1))
+            cells = writer.read_range(t.sheet, t.a1)
+            if len(cells) != len(t.rows):
+                results[req.id] = ItemResult(req.id, ItemStatus.FAILED,
+                                             reason=f"讀取 {t.a1} 得到 {len(cells)} 格（應為 {len(t.rows)} 格），為安全起見不寫入")
+                continue
+            busy = describe_busy(t, cells)
             if busy:
                 results[req.id] = ItemResult(req.id, ItemStatus.LIVE_CONFLICT, reason=busy)
                 continue
@@ -132,6 +141,8 @@ def execute(plan: Plan, writer: SheetWriter, name: str, clock: TimeSource, not_b
         req, t = w.request, w.target
         try:
             cells = writer.read_range(t.sheet, t.a1)
+            if len(cells) != len(t.rows):
+                raise WriterError("讀取格數不符")
         except (WriterError, WriterCrashed) as e:
             if isinstance(e, WriterCrashed):
                 writer.recover()
@@ -145,7 +156,7 @@ def execute(plan: Plan, writer: SheetWriter, name: str, clock: TimeSource, not_b
             results[req.id] = ItemResult(req.id, ItemStatus.SUCCESS, warning=w.warning,
                                          written_at=written_at.get(req.id))
         elif certain:
-            results[req.id] = ItemResult(req.id, ItemStatus.SUSPECTED_CLASH, reason=_clash_reason(cells, name),
+            results[req.id] = ItemResult(req.id, ItemStatus.SUSPECTED_CLASH, reason=_clash_reason(t, cells, name),
                                          warning=w.warning, written_at=written_at[req.id])
         else:
             results[req.id] = ItemResult(req.id, ItemStatus.FAILED, reason="瀏覽器異常，寫入未完成")
