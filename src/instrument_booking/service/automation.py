@@ -1,18 +1,21 @@
 """自動預約服務：背景執行緒每秒檢查一次，依時序預檢、重試、寫入並記錄結果（規格 §7、§9）。
 
 step() 會在預檢與寫入時阻塞（寫入時會等到開放時間），所以必須在專用的背景執行緒呼叫，不可在 GUI 執行緒。
+GUI 執行緒只可呼叫 status()、cancel_current() 與 upcoming()，這些都不會等待 step。
 """
 from __future__ import annotations
 
 import logging
 import threading
 from collections import Counter
-from datetime import datetime, timedelta
+from dataclasses import dataclass, replace
+from datetime import date, datetime, timedelta
+from enum import Enum
 from typing import Callable, Protocol, Sequence
 
 from instrument_booking.browser.downloader import file_id_from_url
 from instrument_booking.core.models import TAIPEI, BookingRequest, ItemResult, ItemStatus
-from instrument_booking.core.schedule import LATE_THRESHOLD
+from instrument_booking.core.schedule import LATE_THRESHOLD, target_week
 from instrument_booking.service.cycle import (PREFLIGHT_LEAD, RETRY_LEAD, Action, CycleState, current_run_at,
                                               next_action)
 from instrument_booking.service.housekeeping import LOGGER_NAME, describe_error
@@ -44,6 +47,43 @@ class Notifier(Protocol):
     def notify(self, title: str, message: str) -> None: ...
 
 
+class ServicePhase(Enum):
+    NOT_CONFIGURED = "尚未完成設定"
+    IDLE = "等待中"                    # 還沒到 T−10，或沒有預約清單
+    PREPARING = "預檢中"
+    READY = "預檢完成，待命寫入"
+    RETRY_WAIT = "預檢失敗，等待重試"
+    RUNNING = "寫入中"
+    DONE = "本週已處理"                # 已寫入、已放棄或已取消
+    ERROR = "服務發生錯誤"
+
+
+@dataclass(frozen=True)
+class ServiceStatus:
+    """給 GUI 的狀態快照（不可變；服務每次狀態改變就整個替換，讀取不需等待 step）。"""
+    phase: ServicePhase
+    run_at: datetime | None = None
+    target_monday: date | None = None
+    retry_at: datetime | None = None   # RETRY_WAIT 時的重試時間
+    last_error: str | None = None      # 本週期最近一次預檢失敗、寫入失敗或取消的說明
+    service_error: str | None = None   # 服務本身的錯誤（step 拋出例外）；恢復後為 None
+    editing_locked: bool = False       # T−10 到寫入結束：GUI 鎖定該週清單的編輯與「重新登入」
+
+
+def _run_at(now: datetime, settings: Settings, store, executed: set[date]) -> datetime:
+    return current_run_at(now, settings.run_weekday, settings.run_time, executed,
+                          lambda m: bool(store.load_bookings(m)), catch_up_since=store.schedule_since())
+
+
+def upcoming(now: datetime, settings: Settings, store) -> tuple[datetime, date]:
+    """要處理的執行時間與目標週（與服務相同的規則，含補跑）；GUI 在服務尚未 step 前顯示倒數用。
+
+    settings 必須是有效的設定（validate_settings 沒有問題）。會讀取檔案，但不會等待服務。
+    """
+    run_at = _run_at(now, settings, store, store.executed_weeks())
+    return run_at, target_week(run_at)
+
+
 def summarize(results: Sequence[ItemResult]) -> str:
     """例：「2 成功、1 即時衝突」；依 STATUS_LABEL 的順序。"""
     counts = Counter(r.status for r in results)
@@ -63,11 +103,16 @@ class AutomationService:
         self._last_error: str | None = None                # 最近一次預檢失敗的說明
         self._service_error: str | None = None             # 已通知過的服務錯誤（同一訊息只通知一次）
         self._cancel = threading.Event()                   # 使用者要求取消本次自動預約（任何執行緒都可設定）
+        self._status = ServiceStatus(ServicePhase.IDLE)    # 只整個替換，GUI 讀取不需取 _lock
         self._lock = threading.Lock()
 
     @property
     def state(self) -> CycleState | None:
         return self._state
+
+    def status(self) -> ServiceStatus:
+        """目前狀態（thread-safe，不會等待 step；寫入中也立即回傳 RUNNING）。"""
+        return self._status
 
     def cancel_current(self) -> None:
         """取消進行中（T−10 到開放時間）的自動預約；該週不再自動執行。只設定旗標，不會阻塞（GUI 可直接呼叫）。
@@ -82,11 +127,10 @@ class AutomationService:
             settings = self._store.load_settings()
             if validate_settings(settings):
                 self._discard_plan("設定無效")
+                self._status = ServiceStatus(ServicePhase.NOT_CONFIGURED, service_error=self._service_error)
                 return  # 尚未完成設定
             executed = self._store.executed_weeks()
-            run_at = current_run_at(now, settings.run_weekday, settings.run_time, executed,
-                                    lambda m: bool(self._store.load_bookings(m)),
-                                    catch_up_since=self._store.schedule_since())
+            run_at = _run_at(now, settings, self._store, executed)
             if self._state is None or self._state.run_at != run_at:
                 self._discard_plan("執行時間改變")
                 self._state, self._last_error = CycleState(run_at), None
@@ -99,6 +143,7 @@ class AutomationService:
             requests = self._store.load_bookings(self._state.target_monday)
             if not requests:
                 self._discard_plan("預約清單被清空")
+                self._publish(now)
                 return
             if self._prepared is not None and tuple(requests) != self._planned:
                 # 規劃依據的清單（順序＝優先序）已不是目前的清單：重新預檢；待命的 Edge 留給新的預檢沿用
@@ -107,14 +152,18 @@ class AutomationService:
                 # 已校時：寫入的時機、是否延遲、開始時間一律以校時後的時間判斷（本機時鐘可能偏慢）
                 now = datetime.fromtimestamp(self._prepared.clock.now(), TAIPEI)
             if self._cancel.is_set() and self._cancel_cycle(now, requests):
+                self._publish(now)
                 return
             action = next_action(now, self._state)
             if action is Action.PREFLIGHT:
+                self._publish(now, ServicePhase.PREPARING)
                 self._preflight(settings, requests)
             elif action is Action.GIVE_UP:
                 self._give_up(now, requests)
             elif action is Action.EXECUTE:
+                self._publish(now, ServicePhase.RUNNING)
                 self._execute(now, settings)
+            self._publish(now)
 
     def run_forever(self, stop: threading.Event, interval: float = 1.0) -> None:
         while not stop.wait(interval):
@@ -123,8 +172,29 @@ class AutomationService:
             except Exception as e:
                 log.exception("自動預約服務發生未預期的錯誤")
                 self._report_service_error(describe_error(e))
+                self._status = replace(self._status, phase=ServicePhase.ERROR, service_error=self._service_error)
             else:
-                self._service_error = None
+                if self._service_error is not None:
+                    self._service_error = None
+                    self._status = replace(self._status, service_error=None)
+
+    def _publish(self, now: datetime, phase: ServicePhase | None = None) -> None:
+        """依目前的週期狀態替換 status 快照；phase 指定進行中的階段（PREPARING、RUNNING）。"""
+        state = self._state
+        if phase is None:
+            if state.finished:
+                phase = ServicePhase.DONE
+            elif state.plan_ready:
+                phase = ServicePhase.READY
+            elif state.preflight_attempts == 1:
+                phase = ServicePhase.RETRY_WAIT
+            else:
+                phase = ServicePhase.IDLE
+        retry_at = (state.retry_at or state.run_at - RETRY_LEAD) if phase is ServicePhase.RETRY_WAIT else None
+        locked = not state.finished and now >= state.run_at - PREFLIGHT_LEAD
+        self._status = ServiceStatus(phase, run_at=state.run_at, target_monday=state.target_monday,
+                                     retry_at=retry_at, last_error=self._last_error,
+                                     service_error=self._service_error, editing_locked=locked)
 
     def _report_service_error(self, message: str) -> None:
         """同一訊息只通知一次；訊息改變或恢復正常後再出錯才再通知。"""
@@ -244,6 +314,8 @@ class AutomationService:
         """結束這個週期並通知：無論紀錄是否寫入成功，都不可再執行一次，也一定要通知使用者。"""
         prepared = self._prepared
         self._state.finished = True
+        if error is not None:
+            self._last_error = error
         self._prepared, self._planned = None, ()
         self._cancel.clear()  # 寫入期間（開放時間後）的取消要求不再有意義
         try:

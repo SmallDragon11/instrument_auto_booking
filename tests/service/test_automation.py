@@ -9,7 +9,8 @@ from instrument_booking.browser.session import NotLoggedIn
 from instrument_booking.core.clock import Clock, ClockSource, ClockSync
 from instrument_booking.core.models import TAIPEI, BookingRequest, Instrument, ItemResult, ItemStatus
 from instrument_booking.core.planner import Plan
-from instrument_booking.service.automation import AutomationService, summarize
+from instrument_booking.service.automation import (AutomationService, ServicePhase, ServiceStatus, summarize,
+                                                   upcoming)
 from instrument_booking.service.runner import Prepared, RunCancelled
 from instrument_booking.service.settings import Settings
 from instrument_booking.storage.json_store import JsonStore, StoreError
@@ -564,3 +565,121 @@ def test_replanning_does_not_use_up_the_retry(env):
     assert [c[0] for c in runner.calls] == ["prepare", "prepare", "abandon", "prepare", "run"]
     assert "12:58 會再試一次" in notes.items[0][1]  # 仍有一次重試，不是直接放棄
     assert store.load_runs()[0].results == OK
+
+
+# --- 給 GUI 的狀態快照 ---
+
+def observe_status(service, runner, method):
+    """在 runner 的 prepare 或 run 進行中讀取 status()。"""
+    seen = []
+    real = getattr(runner, method)
+
+    def wrapper(*args, **kwargs):
+        seen.append(service.status())
+        return real(*args, **kwargs)
+    setattr(runner, method, wrapper)
+    return seen
+
+
+def test_status_through_a_full_cycle(env):
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    assert service.status() == ServiceStatus(ServicePhase.IDLE)  # 尚未 step
+    preparing = observe_status(service, runner, "prepare")
+    running = observe_status(service, runner, "run")
+
+    drive(service, clock, [t(12, 0)])
+    assert service.status() == ServiceStatus(ServicePhase.IDLE, run_at=RUN_AT, target_monday=MON)
+    drive(service, clock, [t(12, 50)])
+    assert preparing[0].phase is ServicePhase.PREPARING and preparing[0].editing_locked
+    assert service.status() == ServiceStatus(ServicePhase.READY, run_at=RUN_AT, target_monday=MON,
+                                             editing_locked=True)
+    drive(service, clock, [t(12, 59)])
+    assert running[0] == ServiceStatus(ServicePhase.RUNNING, run_at=RUN_AT, target_monday=MON, editing_locked=True)
+    assert service.status() == ServiceStatus(ServicePhase.DONE, run_at=RUN_AT, target_monday=MON)
+    drive(service, clock, [t(13, 0, 30)])
+    next_run = datetime(2026, 10, 16, 13, 0, tzinfo=TAIPEI)
+    assert service.status() == ServiceStatus(ServicePhase.IDLE, run_at=next_run, target_monday=date(2026, 10, 19))
+
+
+def test_status_while_waiting_for_retry_and_after_giving_up(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(prepare_errors=[NotLoggedIn("x"), NotLoggedIn("x")])
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    status = service.status()
+    assert (status.phase, status.retry_at, status.editing_locked) == (ServicePhase.RETRY_WAIT, t(12, 58), True)
+    assert "重新登入" in status.last_error
+    drive(service, clock, [t(12, 58), t(12, 58, 1)])
+    status = service.status()
+    assert (status.phase, status.editing_locked, status.retry_at) == (ServicePhase.DONE, False, None)
+    assert "重新登入" in status.last_error
+
+
+def test_status_when_not_configured_or_without_requests(env):
+    store, clock, notes, make = env
+    service = make(FakeRunner())
+    store.save_bookings(MON, [])
+    drive(service, clock, [t(12, 0)])
+    assert service.status() == ServiceStatus(ServicePhase.IDLE, run_at=RUN_AT, target_monday=MON)
+    drive(service, clock, [t(12, 51)])  # T−10 之後：即使沒有清單也鎖定編輯
+    assert service.status() == ServiceStatus(ServicePhase.IDLE, run_at=RUN_AT, target_monday=MON,
+                                             editing_locked=True)
+    store.save_settings(Settings(), now=t(12, 52))
+    drive(service, clock, [t(12, 52)])
+    assert service.status() == ServiceStatus(ServicePhase.NOT_CONFIGURED)
+
+
+def test_status_returns_immediately_while_writing(env):
+    store, clock, notes, make = env
+    entered, release = threading.Event(), threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def run(self, prepared, settings, run_at, *, guard=None):
+            entered.set()
+            release.wait(5)
+            return OK
+    service = make(BlockingRunner())
+    drive(service, clock, [t(12, 50)])
+    clock["now"] = t(12, 59)
+    stepper = threading.Thread(target=service.step)
+    stepper.start()
+    try:
+        assert entered.wait(5)
+        got = []
+        reader = threading.Thread(target=lambda: got.append(service.status()))
+        reader.start()
+        reader.join(timeout=1)
+        assert not reader.is_alive(), "status() 被寫入中的 step 阻塞"
+        assert got[0].phase is ServicePhase.RUNNING and got[0].editing_locked
+    finally:
+        release.set()
+        stepper.join(timeout=5)
+    assert service.status().phase is ServicePhase.DONE
+
+
+def test_status_reports_service_error_and_recovery():
+    stop = threading.Event()
+    store = ScriptedStore([OSError("磁碟錯誤")], stop)
+    service = AutomationService(store=store, runner=FakeRunner(), notifier=Notes())
+    thread = threading.Thread(target=service.run_forever, args=(stop, 0.001))
+    thread.start()
+    thread.join(timeout=5)
+    status = service.status()
+    assert (status.phase, status.service_error) == (ServicePhase.ERROR, "網路或檔案錯誤：磁碟錯誤")
+    store.script, stop = [None], threading.Event()
+    store.stop = stop
+    thread = threading.Thread(target=service.run_forever, args=(stop, 0.001))
+    thread.start()
+    thread.join(timeout=5)
+    assert service.status() == ServiceStatus(ServicePhase.NOT_CONFIGURED)
+
+
+def test_upcoming_matches_the_service(env):
+    store, clock, notes, make = env
+    assert upcoming(t(12, 0), SETTINGS, store) == (RUN_AT, MON)
+    assert upcoming(t(13, 30), SETTINGS, store) == (RUN_AT, MON)  # 錯過且有清單：補跑
+    runner = FakeRunner()
+    drive(make(runner), clock, [t(12, 50), t(12, 59)])
+    assert upcoming(t(13, 30), SETTINGS, store) == (datetime(2026, 10, 16, 13, 0, tzinfo=TAIPEI), date(2026, 10, 19))
