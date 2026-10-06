@@ -15,3 +15,22 @@
 - 執行紀錄要記下 `ClockSync.source`；可加上 NTP 不確定度欄位（目前 `ClockSync` 沒有保留 delay）。
 - `sync_clock` 目前不回報 NTP／HTTPS 為何失敗，紀錄層需要補上原因（規格 §7「記錄警告」）。
 - `due_run` 在週五 13:00 前會回傳上一個週期；呼叫端要依 `Due.target_monday` 過濾預約清單，避免舊週期的補跑在 T 時占住瀏覽器。
+
+## Plan 02（瀏覽器層）完成後新增（2026-10-06）
+
+### Plan 03 必須做到
+
+- **單一執行緒擁有瀏覽器**：Playwright sync API 的物件只能在建立它的執行緒使用。EdgeSession 的 start/restart/close、SnapshotDownloader.download（用 context.request）、所有寫入器呼叫與 execute 都放在同一條專用工作執行緒；GUI 的「重新整理佔用」與「連線測試」不可在 GUI 執行緒呼叫，一律排入同一佇列。設定檔同時只能有一個 Edge，T−10 到驗證結束期間封鎖重新整理。
+- **登入視窗**：開啟 open_login_window 前必須先關閉同一設定檔的 EdgeSession（否則網址會被交給自動化中的瀏覽器）。不要在有 asyncio 事件迴圈的執行緒呼叫 sync_playwright()。
+- **接線方式**：T−10 `session.start()`（NotLoggedIn → 通知）→ `SnapshotDownloader(lambda: session.request, file_id_from_url(url), 快照資料夾)` → `preflight(...)`（now 取自校時後的 Clock）；約 T−1 建立 `BrowserSheetWriter(session.sheet_page(), restart=session.restart_sheet_page, clock=clock, not_before=nb)` 並呼叫 `execute(..., nb, sleep=time.sleep)`；寫入器與 execute 用**同一個** Clock 與**同一個** nb；finally 關閉 session；DownloadError、NotLoggedIn、Playwright 英文錯誤轉為中文訊息。
+- **視窗與焦點**：目前以 `--start-maximized` 有頭啟動，T−10 可能搶走焦點，她正在打字時按鍵會落到實驗室表單。需決定視窗行為（最小化／移到畫面外／不取得焦點），並實測 Edge 不在前景時剪貼簿與 Ctrl+C/V 仍正常（Playwright 預設有焦點模擬，但未實測）。需告知使用者 13:00 時 App 會覆寫系統剪貼簿。
+- **正式使用前的實機端對端測試**（測試副本）：execute 一次跑 3 筆以上、跨管型爐與烘箱工作表、連續不等待；09:00 與 23:00 單格；白色與主題白格；在兩個「同範圍內容不同」的工作表間反覆切換，量測作用中工作表檢查＋0.3 秒等待後是否仍會讀錯；執行中強制關閉 Edge 測試復原。
+- **設定驗證**：名字需去空白、不可為空、不可含 tab 或換行。
+
+### 延後的強化（非阻擋）
+
+- 渲染程序整個卡死時 `page.evaluate`／`keyboard.press` 仍可能無限等待（JS 的 Promise.race 只在頁面仍有回應時有效）→ 考慮以獨立執行緒的看門狗限制整次執行時間。
+- `background` 簡寫若是多色漸層（如 `linear-gradient(rgb(255,255,255), …)`）會取第一個顏色而讀成白色（Google 目前不會輸出這種格式）→ 可改為多色時回傳 "unknown"。
+- `core/job.py` 的 `SheetWriter.read_range` docstring 仍寫「多選下一列」，實作在 23:00 改為多讀上一列 → 更新文字。
+- 非 TargetClosed 的 Playwright／JS 錯誤目前一律視為 WriterCrashed（安全但會重啟瀏覽器、較慢）。
+- EDGE_PATH 寫死在 Program Files (x86)、無備援；`start()` 重複呼叫會洩漏前一個 Playwright；底稿沒有時效限制；快照檔不會自動清理（每個約 3.4 MB）；登入偵測要等滿 60 秒。
