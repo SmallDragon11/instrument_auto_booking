@@ -9,6 +9,7 @@ from instrument_booking.core.clipboard_html import (
     count_rows,
     drop_first_row,
     drop_last_row,
+    is_sheets_table,
     parse_cells,
     parse_rgb,
 )
@@ -224,3 +225,13 @@ def test_build_replaces_background_shorthand():
     out = build_booking_html(src, color="A4C2F4", name="Zoe", fonts=[LAB_FONT])
     assert "background:" not in out
     assert parse_cells(out) == [CellState("Zoe", "A4C2F4")]
+
+
+def test_is_sheets_table():
+    assert is_sheets_table(fixture("booked_5rows.html"))
+    assert is_sheets_table(fixture("empty_3rows.html"))
+    assert not is_sheets_table(fixture("single_cell_span.html"))  # <span data-sheets-root> 不是表格
+    assert not is_sheets_table('<table><tbody><tr><td style="background-color: rgb(1, 2, 3);"></td></tr></tbody></table>')
+    assert not is_sheets_table('<table data-x="data-sheets-root"><tr><td></td></tr></table>')
+    assert not is_sheets_table(None)
+    assert not is_sheets_table("")

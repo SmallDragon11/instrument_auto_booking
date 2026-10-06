@@ -12,6 +12,7 @@ _TD = re.compile(r"<td\b([^>]*)>(.*?)</td>", re.S)
 _TD_OPEN = re.compile(r"<td\b", re.I)
 _STYLE = re.compile(r'(?<!\S)style="([^"]*)"')  # 必須是完整的 style 屬性（不可匹配 data-x-style=）
 _TAG = re.compile(r"<[^>]+>")
+_SHEETS_TABLE = re.compile(r"<table\b[^>]*\sdata-sheets-root=", re.I)
 _RGB = re.compile(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)")
 _RGB_IN = re.compile(r"rgba?\([^)]*\)")
 _NO_FILL = {"none", "transparent", "initial", "unset"}
@@ -78,6 +79,11 @@ def _rows(html: str) -> list[tuple[str, str]]:
     if not rows:
         raise ClipboardFormatError("表格沒有任何列")
     return rows
+
+
+def is_sheets_table(html: str | None) -> bool:
+    """是否為 Google 試算表複製出的表格（<table data-sheets-root>）；其他程式放入的一般 <table> 不算。"""
+    return bool(html) and _SHEETS_TABLE.search(html) is not None
 
 
 def count_rows(html: str | None) -> int:

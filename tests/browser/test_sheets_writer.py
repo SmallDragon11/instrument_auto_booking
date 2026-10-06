@@ -1,6 +1,6 @@
 import pytest
 
-from instrument_booking.browser.sheets_writer import BrowserSheetWriter
+from instrument_booking.browser.sheets_writer import BrowserSheetWriter, sheet_ref
 from instrument_booking.core.clipboard_html import count_rows
 from instrument_booking.core.job import EarlyWriteError, WriterCrashed, WriterError
 from instrument_booking.core.models import CellFont, CellState
@@ -313,3 +313,101 @@ def test_read_times_out_when_clipboard_stays_empty():
         writer.read_range("202610", "B10:B11")
     assert page.elapsed >= 3.0
     assert writer._draft is None
+
+
+
+# ── 貼上前的剪貼簿比對、工作表名稱 ──
+
+def _replace_clipboard_after_jump(page, ref, html):
+    # 我們放入剪貼簿之後、貼上之前（跳到第一格時），剪貼簿被換成 html
+    original_jump = page.jump
+
+    def jump(r):
+        original_jump(r)
+        if r == ref:
+            page.clipboard_html = html
+    page.jump = jump
+
+
+@pytest.mark.parametrize("states", [
+    [CellState("Zoe", "A4C2F4"), CellState(None, "FFE599")],   # 第一格同名，其他格底色不同
+    [CellState("Zoe", "A4C2F4"), CellState("別人", "A4C2F4")],  # 第一格同名，其他格有文字
+    [CellState("Zoe", "FFE599"), CellState(None, "A4C2F4")],   # 第一格同名但底色不同
+], ids=["other-colour", "other-text", "first-colour"])
+def test_paste_refused_when_clipboard_differs_beyond_first_cell(states):
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    _replace_clipboard_after_jump(page, "'202610'!B10", google_html(states))
+    with pytest.raises(WriterError, match="剪貼簿"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert page.pasted == []
+    assert ("press", "Control+V") not in page.log
+
+
+def test_paste_refused_when_clipboard_is_not_a_google_table():
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    same = google_html([CellState("Zoe", "A4C2F4"), CellState(None, "A4C2F4")])
+    _replace_clipboard_after_jump(page, "'202610'!B10", same.replace('data-sheets-root="1" ', ""))
+    with pytest.raises(WriterError, match="剪貼簿"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert page.pasted == []
+
+
+def test_paste_refused_when_clipboard_is_not_a_table():
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    _replace_clipboard_after_jump(page, "'202610'!B10", "<span>Zoe</span>")
+    with pytest.raises(WriterError, match="剪貼簿"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert page.pasted == []
+
+
+def test_paste_accepts_unchanged_clipboard():
+    # 剪貼簿是我們放入的內容（文字與底色逐格相同）→ 照常貼上
+    writer, page = make()
+    writer.read_range("202610", "B10:B12")
+    writer.paste_booking("202610", "B10:B12", "A4C2F4", "Zoe", [LAB] * 3)
+    assert len(page.pasted) == 1
+
+
+def test_copy_accepts_only_google_tables():
+    writer, page = make()
+    original_press = page.press
+
+    def press(keys):
+        original_press(keys)
+        if keys == "Control+C":  # 別的程式放入的一般 <table>（列數正確，但不是 Google 試算表的表格）
+            page.clipboard_html = page.clipboard_html.replace('data-sheets-root="1" ', "")
+    page.press = press
+    with pytest.raises(WriterError, match="無法正確讀取"):
+        writer.read_range("202610", "B10:B11")
+
+
+def test_fake_active_sheet_drops_surrounding_spaces_like_google():
+    page = FakeSheetPage()
+    page.jump("'1月oven2023 '!A1")
+    assert page.active_sheet() == "1月oven2023"
+
+
+def test_sheet_name_with_surrounding_spaces():
+    writer, page = make()
+    page.cells[("1月oven2023 ", "C5")] = CellState(None, "A4C2F4")
+    assert writer.read_range("1月oven2023 ", "C5:C6") == [CellState(None, "A4C2F4"), CellState(None, None)]
+    writer.paste_booking("1月oven2023 ", "C5:C6", "FFE599", "Zoe", [LAB, LAB])
+    assert page.cells[("1月oven2023 ", "C5")] == CellState("Zoe", "FFE599")
+
+
+def test_sheet_ref_escapes_quotes():
+    assert sheet_ref("202610", "B10:B13") == "'202610'!B10:B13"
+    assert sheet_ref("Bob's", "B10") == "'Bob''s'!B10"
+    assert sheet_ref("a''b", "A1") == "'a''''b'!A1"
+
+
+def test_sheet_name_with_quote_is_escaped_in_name_box():
+    writer, page = make()
+    writer.prewarm(["Bob's"])
+    writer.read_range("Bob's", "B10:B11")
+    writer.paste_booking("Bob's", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert [e[1] for e in page.log if e[0] == "jump"] == ["'Bob''s'!A1", "'Bob''s'!B10:B11", "'Bob''s'!B10"]
+    assert page.cells[("Bob's", "B10")] == CellState("Zoe", "A4C2F4")

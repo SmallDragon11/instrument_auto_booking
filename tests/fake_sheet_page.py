@@ -9,7 +9,7 @@ from openpyxl.utils import get_column_letter, range_boundaries
 from instrument_booking.core.clipboard_html import parse_cells
 from instrument_booking.core.models import CellState
 
-_REF = re.compile(r"^'(?P<sheet>[^']+)'!(?P<a1>[A-Z]+\d+(?::[A-Z]+\d+)?)$")
+_REF = re.compile(r"^'(?P<sheet>(?:[^']|'')+)'!(?P<a1>[A-Z]+\d+(?::[A-Z]+\d+)?)$")  # 名稱中的 ' 寫成 ''
 
 WRAPPER_OPEN = ('<google-sheets-html-origin style="color: rgb(0, 0, 0); font-size: medium;">'
                 '<table xmlns="http://www.w3.org/1999/xhtml" cellspacing="0" cellpadding="0" dir="ltr" border="1" '
@@ -71,7 +71,8 @@ class FakeSheetPage:
         self._maybe_fail("jump")
         m = _REF.match(ref)
         assert m, f"名稱方塊格式錯誤：{ref}"
-        self.selection = (m["sheet"], self._expand(m["sheet"], m["a1"]))
+        sheet = m["sheet"].replace("''", "'")
+        self.selection = (sheet, self._expand(sheet, m["a1"]))
         self.log.append(("jump", ref))
 
     def _expand(self, sheet: str, a1: str) -> str:
@@ -91,7 +92,7 @@ class FakeSheetPage:
         if self.active_lag:
             self.active_lag -= 1
             return "（切換中）"
-        return self.selection[0] if self.selection else ""
+        return self.selection[0].strip() if self.selection else ""  # Google 的分頁名稱不顯示前後空白
 
     def press(self, keys: str) -> None:
         self._maybe_fail(keys)

@@ -13,6 +13,7 @@ from instrument_booking.core.clipboard_html import (
     count_rows,
     drop_first_row,
     drop_last_row,
+    is_sheets_table,
     parse_cells,
 )
 from instrument_booking.core.job import EarlyWriteError, TimeSource, WriterCrashed, WriterError
@@ -22,6 +23,26 @@ LOAD_WAIT_MS = 300        # 切換工作表後等待載入（Spike：約 0.3 秒
 RETRY_WAIT_MS = 150       # 讀取不正確時，重試前等待
 CLIPBOARD_POLLS = 20      # Ctrl+C 後輪詢剪貼簿的次數
 CLIPBOARD_POLL_MS = 30
+
+
+def sheet_ref(sheet: str, a1: str) -> str:
+    """名稱方塊的參照：工作表名稱以 ' 包住，名稱中的 ' 寫成 ''（Google 試算表的跳脫規則）。"""
+    return "'" + sheet.replace("'", "''") + "'!" + a1
+
+
+def _same_sheet(active: str, sheet: str) -> bool:
+    """分頁上顯示的名稱不含前後空白（實際有 '1月oven2023 ' 這種名稱），兩邊都去掉後比較。"""
+    return active.strip() == sheet.strip()
+
+
+def _same_content(check: str | None, html: str) -> bool:
+    """剪貼簿是否仍是我們剛放入的內容：Google 表格，且每一格的文字與底色都相同。"""
+    if not is_sheets_table(check):
+        return False
+    try:
+        return parse_cells(check) == parse_cells(html)
+    except ClipboardFormatError:
+        return False
 
 
 class _SelectionExpanded(Exception):
@@ -58,7 +79,7 @@ class BrowserSheetWriter:
 
     def prewarm(self, sheets: Sequence[str]) -> None:
         for sheet in sheets:
-            self._page.jump(f"'{sheet}'!A1")
+            self._page.jump(sheet_ref(sheet, "A1"))
             self._page.wait(LOAD_WAIT_MS)
             self._loaded_sheet = sheet
 
@@ -105,12 +126,11 @@ class BrowserSheetWriter:
             raise WriterError(f"無法組出貼上內容：{e}") from e
         first = a1.split(":")[0]
         self._page.write_clipboard(html, name + "\n" * (len(fonts) - 1))
-        self._page.jump(f"'{sheet}'!{first}")
+        self._page.jump(sheet_ref(sheet, first))
         box, active = self._page.name_box(), self._page.active_sheet()
-        if box != first or active != sheet:
+        if box != first or not _same_sheet(active, sheet):
             raise WriterError(f"選取位置錯誤（{active}!{box}），放棄貼上")
-        check = self._page.read_clipboard_html()
-        if count_rows(check) != len(fonts) or parse_cells(check)[0].value != name.strip():
+        if not _same_content(self._page.read_clipboard_html(), html):
             raise WriterError("剪貼簿內容在貼上前被改變，放棄貼上")
         try:
             self._page.press("Control+V")
@@ -124,12 +144,12 @@ class BrowserSheetWriter:
         self._page = self._restart()
 
     def _copy(self, sheet: str, a1: str, rows: int) -> str:
-        """跳轉並複製；確認名稱方塊與表格列數都正確才回傳，否則重試到逾時拋 WriterError。"""
+        """跳轉並複製；確認名稱方塊正確、且複製到列數正確的 Google 表格才回傳，否則重試到逾時拋 WriterError。"""
         deadline = self._monotonic() + self._read_timeout
         while True:
             self._page.write_clipboard(None, "")  # 先清空，避免讀到舊內容
-            self._page.jump(f"'{sheet}'!{a1}")
-            box = self._page.name_box() if self._page.active_sheet() == sheet else None
+            self._page.jump(sheet_ref(sheet, a1))
+            box = self._page.name_box() if _same_sheet(self._page.active_sheet(), sheet) else None
             if box is not None and _widened(box, a1):
                 raise _SelectionExpanded(a1)  # 再試也一樣：交給呼叫端立刻改選其他範圍
             if box == a1:
@@ -138,7 +158,7 @@ class BrowserSheetWriter:
                     self._loaded_sheet = sheet
                 self._page.press("Control+C")
                 html = self._poll_clipboard()
-                if html is not None and count_rows(html) == rows:
+                if is_sheets_table(html) and count_rows(html) == rows:
                     return html
             if self._monotonic() >= deadline:
                 raise WriterError(f"無法正確讀取 '{sheet}'!{a1}")
