@@ -51,6 +51,7 @@ class FakeSheetPage:
         self.elapsed = 0.0        # 假時間（秒），只由 wait() 推進
         self.stale_copies = 0     # 接下來幾次 Ctrl+C 只複製到單格 <span>（模擬跳轉尚未生效）
         self.name_box_lag = 0     # 接下來幾次 name_box() 回傳舊位置
+        self.active_lag = 0       # 接下來幾次 active_sheet() 回傳「切換中」（模擬工作表尚未切換完成）
         self.fail: dict[str, Exception] = {}  # 操作名稱 → 下一次呼叫時拋出的例外
 
     def now(self) -> float:
@@ -73,6 +74,12 @@ class FakeSheetPage:
             self.name_box_lag -= 1
             return "A1"
         return self.selection[1] if self.selection else ""
+
+    def active_sheet(self) -> str:
+        if self.active_lag:
+            self.active_lag -= 1
+            return "（切換中）"
+        return self.selection[0] if self.selection else ""
 
     def press(self, keys: str) -> None:
         self._maybe_fail(keys)

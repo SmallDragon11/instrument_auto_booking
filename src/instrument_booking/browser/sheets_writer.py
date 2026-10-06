@@ -14,7 +14,7 @@ from instrument_booking.core.clipboard_html import (
     drop_last_row,
     parse_cells,
 )
-from instrument_booking.core.job import EarlyWriteError, TimeSource, WriterError
+from instrument_booking.core.job import EarlyWriteError, TimeSource, WriterCrashed, WriterError
 from instrument_booking.core.models import CellFont, CellState
 
 LOAD_WAIT_MS = 300        # 切換工作表後等待載入（Spike：約 0.3 秒）
@@ -36,11 +36,13 @@ class BrowserSheetWriter:
         self._monotonic = monotonic
         self._read_timeout = read_timeout
         self._draft: tuple[str, str, str] | None = None  # (sheet, a1, 剛複製的 HTML)
+        self._loaded_sheet: str | None = None  # 已載入完成的工作表（切換後需等待載入）
 
     def prewarm(self, sheets: Sequence[str]) -> None:
         for sheet in sheets:
             self._page.jump(f"'{sheet}'!A1")
             self._page.wait(LOAD_WAIT_MS)
+            self._loaded_sheet = sheet
 
     def read_range(self, sheet: str, a1: str) -> list[CellState]:
         self._draft = None
@@ -62,9 +64,9 @@ class BrowserSheetWriter:
         return cells
 
     def paste_booking(self, sheet: str, a1: str, color: str, name: str, fonts: Sequence[CellFont]) -> None:
+        draft, self._draft = self._draft, None  # 底稿只能用一次：任何結果（含拒絕）都先取走
         if self._clock.now() < self._not_before:
             raise EarlyWriteError("時間未到，拒絕貼上")
-        draft, self._draft = self._draft, None
         if draft is None or draft[:2] != (sheet, a1):
             raise WriterError(f"'{sheet}'!{a1} 沒有對應的即時讀取底稿，拒絕貼上")
         try:
@@ -74,12 +76,21 @@ class BrowserSheetWriter:
         first = a1.split(":")[0]
         self._page.write_clipboard(html, name + "\n" * (len(fonts) - 1))
         self._page.jump(f"'{sheet}'!{first}")
-        if self._page.name_box() != first:
-            raise WriterError(f"選取位置錯誤（名稱方塊為 {self._page.name_box()}），放棄貼上")
-        self._page.press("Control+V")
+        box, active = self._page.name_box(), self._page.active_sheet()
+        if box != first or active != sheet:
+            raise WriterError(f"選取位置錯誤（{active}!{box}），放棄貼上")
+        check = self._page.read_clipboard_html()
+        if count_rows(check) != len(fonts) or parse_cells(check)[0].value != name.strip():
+            raise WriterError("剪貼簿內容在貼上前被改變，放棄貼上")
+        try:
+            self._page.press("Control+V")
+        except WriterError as e:
+            # 已送出 Ctrl+V：無法確定是否已貼上，必須交給 recover 與驗證判斷
+            raise WriterCrashed(f"貼上時發生錯誤，無法確定是否已貼上：{e}") from e
 
     def recover(self) -> None:
         self._draft = None
+        self._loaded_sheet = None
         self._page = self._restart()
 
     def _copy(self, sheet: str, a1: str, rows: int) -> str:
@@ -88,7 +99,10 @@ class BrowserSheetWriter:
         while True:
             self._page.write_clipboard(None, "")  # 先清空，避免讀到舊內容
             self._page.jump(f"'{sheet}'!{a1}")
-            if self._page.name_box() == a1:
+            if self._page.active_sheet() == sheet and self._page.name_box() == a1:
+                if sheet != self._loaded_sheet:
+                    self._page.wait(LOAD_WAIT_MS)  # 剛切換工作表：等表格載入後再複製
+                    self._loaded_sheet = sheet
                 self._page.press("Control+C")
                 html = self._poll_clipboard()
                 if html is not None and count_rows(html) == rows:

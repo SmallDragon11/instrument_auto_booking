@@ -10,6 +10,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 from instrument_booking.core.job import WriterCrashed, WriterError
 
 NAME_BOX = "#t-name-box"
+ACTIVE_SHEET_TAB = ".docs-sheet-active-tab .docs-sheet-tab-name"  # 已於測試副本實測（2026-10-06）
 
 READ_HTML_JS = """async () => {
   const items = await navigator.clipboard.read();
@@ -35,6 +36,10 @@ class SheetPage(Protocol):
 
     def name_box(self) -> str:
         """名稱方塊目前顯示的內容（例 "B10:B13"）。"""
+        ...
+
+    def active_sheet(self) -> str:
+        """目前作用中的工作表名稱（工作表分頁上的文字）。"""
         ...
 
     def press(self, keys: str) -> None:
@@ -79,6 +84,10 @@ class PlaywrightSheetPage:
     @_translate
     def name_box(self) -> str:
         return self._page.locator(NAME_BOX).input_value()
+
+    @_translate
+    def active_sheet(self) -> str:
+        return self._page.locator(ACTIVE_SHEET_TAB).first.inner_text().strip()
 
     @_translate
     def press(self, keys: str) -> None:

@@ -2,13 +2,14 @@ import pytest
 from playwright.sync_api import Error as PlaywrightError
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
-from instrument_booking.browser.sheet_page import NAME_BOX, READ_HTML_JS, WRITE_JS, PlaywrightSheetPage
+from instrument_booking.browser.sheet_page import ACTIVE_SHEET_TAB, NAME_BOX, READ_HTML_JS, WRITE_JS, PlaywrightSheetPage
 from instrument_booking.core.job import WriterCrashed, WriterError
 
 
 class FakeLocator:
-    def __init__(self, page):
+    def __init__(self, page, selector):
         self.page = page
+        self.selector = selector
 
     def click(self):
         self.page.calls.append("click")
@@ -21,6 +22,13 @@ class FakeLocator:
 
     def input_value(self):
         return "B10:B13"
+
+    @property
+    def first(self):
+        return self
+
+    def inner_text(self):
+        return " 202610 " if self.selector == ACTIVE_SHEET_TAB else ""
 
 
 class FakeKeyboard:
@@ -40,8 +48,8 @@ class FakeRawPage:
         self.keyboard = FakeKeyboard(self)
 
     def locator(self, selector):
-        assert selector == NAME_BOX
-        return FakeLocator(self)
+        assert selector in (NAME_BOX, ACTIVE_SHEET_TAB)
+        return FakeLocator(self, selector)
 
     def evaluate(self, js, arg=None):
         self.calls.append(("evaluate", js, arg))
@@ -88,3 +96,7 @@ def test_other_playwright_errors_become_writer_crashed():
     raw.raise_on_key = PlaywrightError("Target page, context or browser has been closed")
     with pytest.raises(WriterCrashed, match="瀏覽器異常"):
         PlaywrightSheetPage(raw).press("Control+C")
+
+
+def test_active_sheet_reads_tab_name():
+    assert PlaywrightSheetPage(FakeRawPage()).active_sheet() == "202610"

@@ -4,7 +4,7 @@ from instrument_booking.browser.sheets_writer import BrowserSheetWriter
 from instrument_booking.core.clipboard_html import count_rows
 from instrument_booking.core.job import EarlyWriteError, WriterCrashed, WriterError
 from instrument_booking.core.models import CellFont, CellState
-from fake_sheet_page import FakeSheetPage
+from fake_sheet_page import FakeSheetPage, google_html
 
 T0 = 1_791_522_000.0
 LAB = CellFont(12.0, True, "center")
@@ -176,3 +176,62 @@ def test_page_errors_propagate_unchanged():
     page.fail["Control+C"] = WriterCrashed("瀏覽器當掉")
     with pytest.raises(WriterCrashed):
         writer.read_range("202610", "B10:B11")
+
+
+def test_read_waits_until_target_sheet_is_active():
+    writer, page = make()
+    page.active_lag = 2  # 前兩次跳轉後工作表尚未切換完成
+    assert writer.read_range("10月oven2026", "C5:C6") == [CellState(None, None)] * 2
+    assert [e for e in page.log if e[0] == "press"] == [("press", "Control+C")]  # 工作表不對時不按 Ctrl+C
+
+
+def test_switching_sheet_waits_for_load_once():
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    writer.read_range("10月oven2026", "C5:C6")
+    assert page.elapsed == pytest.approx(0.6)  # 兩次切換各等 0.3 秒
+    writer.read_range("10月oven2026", "C7:C8")
+    assert page.elapsed == pytest.approx(0.6)  # 同一工作表不再等待
+
+
+def test_paste_refused_when_target_sheet_not_active():
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    page.active_lag = 1
+    with pytest.raises(WriterError, match="選取位置錯誤"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert page.pasted == []
+
+
+def test_paste_refused_when_clipboard_changed_by_another_program():
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    original_jump = page.jump
+
+    def jump(ref):
+        original_jump(ref)
+        if ref == "'202610'!B10":  # 我們放入剪貼簿之後、貼上之前，別的程式複製了東西
+            page.clipboard_html = google_html([CellState("別人", None), CellState(None, None)])
+    page.jump = jump
+    with pytest.raises(WriterError, match="剪貼簿"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert page.pasted == []
+
+
+def test_ctrl_v_failure_is_reported_as_crash():
+    writer, page = make()
+    writer.read_range("202610", "B10:B11")
+    page.fail["Control+V"] = WriterError("操作逾時")
+    with pytest.raises(WriterCrashed, match="無法確定是否已貼上"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+
+
+def test_refused_early_paste_drops_the_draft():
+    writer, page = make(clock_t=T0 - 0.01)
+    writer.read_range("202610", "B10:B11")
+    with pytest.raises(EarlyWriteError):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    writer._clock.t = T0 + 1
+    with pytest.raises(WriterError, match="底稿"):
+        writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
+    assert page.pasted == []
