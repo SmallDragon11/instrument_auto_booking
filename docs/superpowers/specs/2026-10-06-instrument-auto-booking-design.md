@@ -30,7 +30,7 @@
 | 自己的時段重疊 | 允許（重疊即互為備案）。執行時才判斷：只有重疊的高順位那筆**實際寫入成功**，低順位才跳過；高順位失敗則照常嘗試低順位 |
 | 工作表不存在 | 該筆回報失敗 |
 | 氣體不在圖例 | 不算失敗：改用使用者選擇該氣體當時的色碼寫入，結果附警告 |
-| 寫入手法 | 組出「名字＋整段底色」的剪貼簿 HTML，選第一格後 Ctrl+V 一次寫入（與人工複製貼上相同，最快） |
+| 寫入手法 | 以即時檢查時 Ctrl+C 複製到的目標範圍 HTML 為底稿，只改每格底色、第一格填名字、每格加上快照中原本的字型樣式，選第一格後 Ctrl+V 一次寫入（框線與字型和人工複製貼上完全一致，最快）。見 [Spike 報告](../../spike-report.md) |
 | 溫度 | 不填 |
 | 預約表格式 | Google 雲端硬碟上的 `.xlsx`（Office 編輯模式），Sheets API 不可用 |
 | 讀寫方式 | 瀏覽器自動化：Playwright 操作 Edge 專屬設定檔（使用者以個人 Google 帳號登入一次） |
@@ -75,10 +75,12 @@ class SnapshotSource(Protocol):
 class SheetWriter(Protocol):
     def prewarm(self, sheets: list[str]) -> None: ...                   # 預先載入目標工作表
     def read_range(self, sheet: str, a1: str) -> list[CellState]: ...   # 文字＋底色（Ctrl+C）
-    def paste_booking(self, sheet: str, a1: str, color: str, name: str) -> None: ...  # Ctrl+V
+    def paste_booking(self, sheet: str, a1: str, color: str, name: str,
+                      fonts: Sequence[CellFont]) -> None: ...                # Ctrl+V
+    def recover(self) -> None: ...                                         # 瀏覽器異常後重啟
 ```
 
-剪貼簿 HTML 的組裝（`core/clipboard_html.py`：由名字、色碼、列數產生 HTML；解析 Ctrl+C 得到的 HTML 為 `CellState`）屬於純邏輯，放在 `core/` 以便測試。
+剪貼簿 HTML 的處理（`core/clipboard_html.py`：解析 Ctrl+C 得到的 HTML 為 `CellState`、驗證列數、刪除多讀的列、改寫底色／名字／字型）屬於純邏輯，放在 `core/` 以便測試；格式見 [Spike 報告](../../spike-report.md)「剪貼簿 HTML 格式」。
 
 ## 5. 資料模型
 
@@ -96,6 +98,12 @@ class BookingRequest:
     gas: str | None          # 管型爐必填（圖例名稱，如 "Ar"）；烘箱為 None
     color: str               # 選擇當時的圖例色碼（如 "A4C2F4"）；圖例找不到氣體時的備用色
 # 優先序＝清單中的順序；同一儀器的時段可重疊（互為備案）
+
+@dataclass(frozen=True)
+class CellFont:              # 由快照讀出，貼上時逐格寫回，避免字型被重設
+    size: float | None       # 例：12.0
+    bold: bool
+    h_align: str | None      # 例："center"
 
 @dataclass
 class Settings:
@@ -149,19 +157,20 @@ T＝預約時間（網路時間）。
 T−10 分  預檢
          ├ 校時（NTP time.google.com → 失敗改用 HTTPS Date 標頭 → 再失敗用本機時間並記錄警告）
          ├ 啟動 Edge 專屬設定檔、開啟試算表；被導向登入頁 → 通知「請重新登入」
-         ├ 下載 xlsx 快照 → planner 依優先序逐筆：
+         ├ 下載 xlsx 快照（僅限 export?format=xlsx 網址；Drive 下載網址會回傳舊版本）→ planner 依優先序逐筆：
          │    工作表不存在 → FAILED
          │    快照中已佔用 → TAKEN_IN_SNAPSHOT
          │    氣體不在圖例 → 改用 request.color，記下警告
-         └ 產出寫入清單 [(request, 工作表, A1 範圍, 色碼)]，依優先序排列
+         └ 產出寫入清單 [(request, 工作表, A1 範圍, 色碼, 每格字型)]，依優先序排列
          （自我重疊此時不判斷，留到執行時）
          失敗 → T−2 分重試一次 → 仍失敗則放棄並記錄
 T−1 分   預熱：依序切換到每個目標工作表，讓網頁先載入；停在試算表頁面待命
 T+餘量   依優先序逐筆：
          ├ 與「本次已成功寫入」的某筆重疊 → SELF_OVERLAP，跳過
-         ├ 名稱方塊輸入 '工作表'!範圍（同時切換工作表並選取）
-         ├ Ctrl+C → 解析剪貼簿 HTML 的文字與底色 → 任一格非空 → LIVE_CONFLICT，跳過
-         └ 全空 → 將「第一格名字＋整段底色」的 HTML 放入剪貼簿 → 選第一格 → Ctrl+V
+         ├ 名稱方塊輸入 '工作表'!範圍（同時切換工作表並選取；1 格的預約多選下一列）
+         ├ Ctrl+C → 驗證為列數正確的 <table> → 解析文字與底色 → 任一格非空 → LIVE_CONFLICT，跳過
+         └ 全空 → 以剛複製的 HTML 為底稿：刪除多讀的列、每格改底色並加上字型、第一格填名字
+                 → 放入剪貼簿 → 名稱方塊跳到第一格並確認 → Ctrl+V
 全部寫完  等 5 秒 → 逐筆 Ctrl+C 驗證：第一格＝名字且整段＝色碼 → SUCCESS，否則 SUSPECTED_CLASH
 回報     執行紀錄＋Windows 系統通知；此週清單標記「已執行」
 ```
@@ -222,6 +231,7 @@ Fluent 風格，左側導覽列三頁，支援淺色／深色／跟隨系統。
 | 狀況 | 處理 |
 |---|---|
 | 偷跑防護 | 雙重：排程器只在網路時間 ≥ T＋安全餘量（§7）時觸發；`sheets_writer` 每次貼上前再檢查，未過 T＋餘量一律拒絕 |
+| **貼上前驗證（強制）** | Spike 中曾因跳轉未生效就複製，把錯誤內容貼上而清除了格子格式。因此：複製結果必須是列數正確的 `<table>`；按 Ctrl+V 前名稱方塊必須顯示目標第一格；只貼上「由目標範圍複製再改寫」的 HTML。任一項不符就重試（最多約 3 秒），仍失敗則該筆 FAILED，**絕不貼上未驗證的內容** |
 | 重複執行 | 單一執行個體（再次啟動只喚出既有視窗）；每個目標週只執行一次 |
 | 預檢失敗 | T−10 分通知，T−2 分重試一次，仍失敗則放棄並記錄原因 |
 | 瀏覽器當掉 | 重啟 Edge，從下一筆未處理的繼續；已寫入的不重寫，未處理的照常即時檢查 |
@@ -244,6 +254,8 @@ Fluent 風格，左側導覽列三頁，支援淺色／深色／跟隨系統。
 - 開機自動啟動：於使用者啟動資料夾建立捷徑（可由設定關閉）。
 
 ## 12. 實作前的驗證程式（Spike）
+
+> **已完成（2026-10-06）**：8 項皆可行，結果與對設計的影響見 [Spike 報告](../../spike-report.md)；本規格 §3、§4、§5、§7、§9 已依報告更新。
 
 正式開發前，以一次性程式在使用者電腦上、對**測試副本**確認：
 
