@@ -43,3 +43,12 @@ def test_weekday_time_and_theme():
 
 def test_unconfigured_settings_report_name_and_url():
     assert len(validate_settings(Settings())) == 2
+
+
+def test_require_configured_raises_with_all_problems():
+    from instrument_booking.service.settings import NotConfigured, require_configured
+    good = Settings(name="Zoe", spreadsheet_url="https://docs.google.com/spreadsheets/d/X/edit")
+    assert require_configured(good) is good
+    with pytest.raises(NotConfigured) as info:
+        require_configured(Settings())
+    assert str(info.value) == "請先完成設定：請填寫要寫入表格的名字；預約表網址必須是 Google 試算表網址"

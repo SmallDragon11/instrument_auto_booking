@@ -174,12 +174,21 @@ class AutomationService:
                 self.step()
             except Exception as e:
                 log.exception("自動預約服務發生未預期的錯誤")
+                self._abandon_after_error()
                 self._report_service_error(describe_error(e))
                 self._status = replace(self._status, phase=ServicePhase.ERROR, service_error=self._service_error)
             else:
                 if self._service_error is not None:
                     self._service_error = None
                     self._status = replace(self._status, service_error=None)
+
+    def _abandon_after_error(self) -> None:
+        """step 出錯：丟棄待命的規劃並關閉 Edge，避免最小化的 Edge 無限期留著；恢復後會重新預檢。"""
+        try:
+            with self._lock:
+                self._discard_plan("服務發生錯誤")
+        except Exception:
+            log.exception("關閉待命的 Edge 失敗")
 
     def _publish(self, now: datetime, phase: ServicePhase | None = None) -> None:
         """依目前的週期狀態替換 status 快照；phase 指定進行中的階段（PREPARING、RUNNING）。"""

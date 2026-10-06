@@ -480,6 +480,7 @@ def test_cancel_current_while_plan_is_ready_closes_edge_and_skips_the_week(env):
     assert [c[0] for c in runner.calls] == ["prepare", "abandon"]  # 不寫入
     (record,) = store.load_runs()
     assert record.error == "已手動取消" and record.results == () and record.target_monday == MON
+    assert (record.snapshot_at, record.clock_source) == (t(12, 50), "NTP")  # 先記錄再關閉 Edge
     assert notes.items == [("自動預約已取消", "已手動取消（本週不會再自動執行）")]
 
 
@@ -745,3 +746,51 @@ def test_completion_notice_warns_when_clock_was_not_synced(env):
     drive(make(FakeRunner(source=ClockSource.LOCAL)), clock, [t(12, 50), t(12, 59)])
     assert notes.items == [("自動預約完成", "1 成功（未能網路校時，使用本機時間＋3 秒餘量）")]
     assert store.load_runs()[0].clock_source == "本機時間"
+
+
+# --- 服務錯誤時不可讓待命的 Edge 無限期留著 ---
+
+def test_service_error_after_preflight_discards_plan_and_closes_edge(env, monkeypatch):
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    real_load = store.load_bookings
+    stop = threading.Event()
+
+    def broken(monday):
+        stop.set()
+        raise OSError("磁碟錯誤")
+    monkeypatch.setattr(store, "load_bookings", broken)
+    thread = threading.Thread(target=service.run_forever, args=(stop, 0.001))
+    thread.start()
+    thread.join(timeout=5)
+    assert runner.calls == [("prepare", (REQ,)), ("abandon",)]
+    assert service.status().phase is ServicePhase.ERROR
+    monkeypatch.setattr(store, "load_bookings", real_load)
+    drive(service, clock, [t(12, 51), t(12, 59)])  # 恢復後立刻重新預檢（不算失敗重試）
+    assert [c[0] for c in runner.calls] == ["prepare", "abandon", "prepare", "run"]
+
+
+def test_service_error_while_closing_edge_is_still_reported(env, monkeypatch):
+    store, clock, notes, make = env
+
+    class BrokenAbandon(FakeRunner):
+        def abandon(self):
+            super().abandon()
+            raise RuntimeError("Edge 關不掉")
+    runner = BrokenAbandon()
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    stop = threading.Event()
+
+    def broken(monday):
+        stop.set()
+        raise OSError("磁碟錯誤")
+    monkeypatch.setattr(store, "load_bookings", broken)
+    thread = threading.Thread(target=service.run_forever, args=(stop, 0.001))
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert notes.items == [("自動預約服務發生錯誤", "網路或檔案錯誤：磁碟錯誤")]
+    assert runner.calls[-1] == ("abandon",)

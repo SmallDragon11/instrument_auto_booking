@@ -4,7 +4,7 @@ import pytest
 
 from instrument_booking.core.clock import ClockSource, ClockSync
 from instrument_booking.service.connection import run_connection_test, start_login
-from instrument_booking.service.settings import Settings
+from instrument_booking.service.settings import NotConfigured, Settings
 from instrument_booking.storage.json_store import JsonStore
 from service.fakes import FakeSession, InlineWorker, XlsxRequest
 from sheet_builder import add_oven_sheet, add_tube_sheet, new_workbook
@@ -70,3 +70,29 @@ def test_snapshot_without_gas_legend_is_not_ok(tmp_path):
     assert not report.ok
     assert report.message == "已下載預約表，但找不到氣體圖例"
     assert report.legend == {} and store.load_legend() == {}
+
+
+def test_start_login_without_spreadsheet_url_opens_google_sign_in(tmp_path):
+    worker = InlineWorker(FakeSession([]))
+    calls = []
+    start_login(worker, Settings(), tmp_path / "profile", popen=calls.append)
+    assert worker.closed == 1
+    assert calls[0][-1] == "https://accounts.google.com"
+
+
+def test_start_login_with_invalid_url_raises_not_configured(tmp_path):
+    worker = InlineWorker(FakeSession([]))
+    calls = []
+    with pytest.raises(NotConfigured, match="請先完成設定：預約表網址必須是 Google 試算表網址"):
+        start_login(worker, Settings(spreadsheet_url="https://example.com/x"), tmp_path / "profile",
+                    popen=calls.append)
+    assert calls == [] and worker.closed == 0
+
+
+def test_unreadable_settings_are_reported_not_raised(tmp_path):
+    store, worker, kwargs = make(tmp_path)
+    (tmp_path / "data" / "settings.json").write_text("{not json", encoding="utf-8")
+    report = run_connection_test(store, worker, tmp_path / "snap", **kwargs)
+    assert not report.ok and "settings.json" in report.message
+    assert (report.clock_source, report.clock_diff) == ("未校時", 0.0)
+    assert worker.jobs == []

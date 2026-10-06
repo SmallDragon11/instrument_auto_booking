@@ -2,12 +2,17 @@ from datetime import date, timedelta
 
 from instrument_booking.core.models import Instrument
 from instrument_booking.core.sheet_locator import SheetIndex
+import pytest
+
+from instrument_booking.service.housekeeping import describe_error
 from instrument_booking.service.occupancy import OccupancyService, legend_for_week, week_view
+from instrument_booking.service.settings import NotConfigured, Settings
 from instrument_booking.storage.json_store import JsonStore
 from service.fakes import FakeSession, InlineWorker, XlsxRequest
 from sheet_builder import add_oven_sheet, add_tube_sheet, new_workbook, solid
 
 MON = date(2026, 10, 12)
+URL = "https://docs.google.com/spreadsheets/d/FILEID/edit"
 
 
 def build():
@@ -60,9 +65,24 @@ def test_service_downloads_computes_caches_legend_and_closes_browser(tmp_path):
     request = XlsxRequest(wb)
     worker = InlineWorker(FakeSession([], request=request))
     store = JsonStore(tmp_path / "data")
-    service = OccupancyService(worker, file_id=lambda: "FILEID", snapshot_dir=tmp_path / "snap", store=store)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL))
+    service = OccupancyService(worker, snapshot_dir=tmp_path / "snap", store=store)
     view = service.refresh(MON)
     assert request.urls == ["https://docs.google.com/spreadsheets/d/FILEID/export?format=xlsx"]
     assert view.legend == {"Ar": "A4C2F4", "N2": "D5A6BD"}
     assert store.load_legend() == view.legend
     assert worker.jobs == [False]  # 下載完就關閉瀏覽器
+
+
+@pytest.mark.parametrize("settings", [Settings(), Settings(name="Zoe", spreadsheet_url="https://example.com/x")],
+                         ids=["empty", "bad_url"])
+def test_refresh_without_valid_settings_raises_not_configured(tmp_path, settings):
+    worker = InlineWorker(FakeSession([]))
+    store = JsonStore(tmp_path / "data")
+    store.save_settings(settings)
+    service = OccupancyService(worker, snapshot_dir=tmp_path / "snap", store=store)
+    with pytest.raises(NotConfigured) as info:
+        service.refresh(MON)
+    assert describe_error(info.value).startswith("請先完成設定：")
+    assert "預約表網址必須是 Google 試算表網址" in describe_error(info.value)
+    assert worker.jobs == []  # 不開瀏覽器

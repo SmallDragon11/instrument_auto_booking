@@ -9,6 +9,10 @@ from instrument_booking.browser.downloader import file_id_from_url
 THEMES = ("system", "light", "dark")
 
 
+class NotConfigured(Exception):
+    """設定尚未完成或無效，無法進行需要設定的動作（訊息為給使用者看的繁體中文）。"""
+
+
 @dataclass(frozen=True)
 class Settings:
     name: str = ""                 # 寫入預約第一格的名字
@@ -40,3 +44,11 @@ def validate_settings(s: Settings) -> list[str]:
     if s.theme not in THEMES:
         errors.append("外觀設定不正確")
     return errors
+
+
+def require_configured(s: Settings) -> Settings:
+    """設定有問題時拋 NotConfigured（「請先完成設定：…」）；否則原樣回傳。"""
+    problems = validate_settings(s)
+    if problems:
+        raise NotConfigured("請先完成設定：" + "；".join(problems))
+    return s

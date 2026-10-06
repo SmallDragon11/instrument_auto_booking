@@ -4,15 +4,15 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Callable
 
-from instrument_booking.browser.downloader import SnapshotDownloader
+from instrument_booking.browser.downloader import SnapshotDownloader, file_id_from_url
 from instrument_booking.core.job import load_snapshot
 from instrument_booking.core.legend import read_tube_legend
 from instrument_booking.core.models import Instrument
 from instrument_booking.core.occupancy import cell_state, is_empty
 from instrument_booking.core.sheet_locator import ALL_HOURS, LocateError, SheetIndex, sheet_kind
 from instrument_booking.service.housekeeping import prune_snapshots
+from instrument_booking.service.settings import require_configured
 
 Slot = tuple[Instrument, date, int]  # (儀器, 日期, 起始小時)
 
@@ -66,14 +66,14 @@ def week_view(wb, index: SheetIndex, monday: date) -> WeekView:
 class OccupancyService:
     """以瀏覽器的登入狀態下載最新快照並計算某一週的佔用（會阻塞，請在背景執行緒呼叫）。"""
 
-    def __init__(self, worker, *, file_id: Callable[[], str], snapshot_dir: Path, store) -> None:
+    def __init__(self, worker, *, snapshot_dir: Path, store) -> None:
         self._worker = worker
-        self._file_id = file_id
         self._snapshot_dir = snapshot_dir
         self._store = store
 
     def refresh(self, monday: date) -> WeekView:
-        file_id = self._file_id()
+        """下載目前設定的預約表；設定無效時拋 NotConfigured（不開瀏覽器）。"""
+        file_id = file_id_from_url(require_configured(self._store.load_settings()).spreadsheet_url)
         path = self._worker.submit(
             lambda session: SnapshotDownloader(lambda: session.request, file_id, self._snapshot_dir).download()
         ).result()

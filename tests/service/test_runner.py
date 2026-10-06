@@ -115,8 +115,9 @@ def test_other_browser_work_after_prepare_keeps_standby_edge_open(tmp_path):
         runner = BookingRunner(worker, snapshot_dir=tmp_path / "snap",
                                sync=lambda: ClockSync(ClockSource.NTP, (T0 - 600) - 1000.0),
                                local_now=lambda: 1000.0)
-        occupancy = OccupancyService(worker, file_id=lambda: "FILEID", snapshot_dir=tmp_path / "snap",
-                                     store=JsonStore(tmp_path / "data"))
+        store = JsonStore(tmp_path / "data")
+        store.save_settings(SETTINGS)
+        occupancy = OccupancyService(worker, snapshot_dir=tmp_path / "snap", store=store)
         runner.prepare(SETTINGS, [REQ])
         occupancy.refresh(MON)  # T−10～T−1 之間使用者開啟「下週預約」頁
         assert [e for e, _ in log] == ["start"]  # 待命的 Edge 沒有被關閉

@@ -16,9 +16,10 @@ from instrument_booking.core.models import TAIPEI
 from instrument_booking.core.schedule import next_run, target_week
 from instrument_booking.service.housekeeping import describe_error, prune_snapshots
 from instrument_booking.service.occupancy import legend_for_week
-from instrument_booking.service.settings import Settings, validate_settings
+from instrument_booking.service.settings import NotConfigured, Settings, validate_settings
 
 NOT_SYNCED = "未校時"
+GOOGLE_SIGN_IN_URL = "https://accounts.google.com"
 
 
 @dataclass(frozen=True)
@@ -33,8 +34,11 @@ class ConnectionReport:
 def run_connection_test(store, worker, snapshot_dir: Path, *, sync: Callable[[], ClockSync] = sync_clock,
                         local_now: Callable[[], float] = time.monotonic,
                         wall: Callable[[], float] = time.time) -> ConnectionReport:
-    """校時、登入、下載表格、讀圖例；不寫入任何東西（會阻塞，請在背景執行緒呼叫）。"""
-    settings = store.load_settings()
+    """校時、登入、下載表格、讀圖例；不寫入任何東西（會阻塞，請在背景執行緒呼叫）。不會拋出例外。"""
+    try:
+        settings = store.load_settings()
+    except Exception as e:  # 例如 settings.json 損毀：回報失敗，不連網
+        return ConnectionReport(False, describe_error(e), NOT_SYNCED, 0.0)
     problems = validate_settings(settings)
     if problems:  # 設定無效：不連網（不校時、不開瀏覽器）
         return ConnectionReport(False, "；".join(problems), NOT_SYNCED, 0.0)
@@ -61,6 +65,17 @@ def run_connection_test(store, worker, snapshot_dir: Path, *, sync: Callable[[],
 
 
 def start_login(worker, settings: Settings, profile_dir: Path, *, popen: Callable = subprocess.Popen):
-    """先關閉自動化中的瀏覽器（同一設定檔只能有一個 Edge），再開啟一般 Edge 讓使用者登入。"""
+    """先關閉自動化中的瀏覽器（同一設定檔只能有一個 Edge），再開啟一般 Edge 讓使用者登入。
+
+    尚未填預約表網址時開啟 Google 登入頁；網址無效時拋 NotConfigured（不關閉、不開啟任何瀏覽器）。
+    """
+    url = settings.spreadsheet_url.strip()
+    if url:
+        try:
+            file_id_from_url(url)
+        except ValueError:
+            raise NotConfigured("請先完成設定：預約表網址必須是 Google 試算表網址") from None
+    else:
+        url = GOOGLE_SIGN_IN_URL
     worker.close_session().result()
-    return open_login_window(settings.spreadsheet_url, profile_dir, popen=popen)
+    return open_login_window(url, profile_dir, popen=popen)

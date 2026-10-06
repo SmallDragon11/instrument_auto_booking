@@ -4,7 +4,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from instrument_booking.browser.downloader import file_id_from_url
 from instrument_booking.browser.session import EdgeSession, default_profile_dir
 from instrument_booking.service.automation import AutomationService, Notifier
 from instrument_booking.service.housekeeping import setup_logging
@@ -39,7 +38,6 @@ def build_services(notifier: Notifier, *, data_dir: Path | None = None, profile_
     store = JsonStore(data_dir)
     worker = BrowserWorker(lambda: session_factory(store.load_settings().spreadsheet_url, profile_dir))
     runner = BookingRunner(worker, snapshot_dir=snapshot_dir)
-    occupancy = OccupancyService(worker, file_id=lambda: file_id_from_url(store.load_settings().spreadsheet_url),
-                                 snapshot_dir=snapshot_dir, store=store)
+    occupancy = OccupancyService(worker, snapshot_dir=snapshot_dir, store=store)
     automation = AutomationService(store=store, runner=runner, notifier=notifier)
     return Services(data_dir, profile_dir, snapshot_dir, store, worker, runner, occupancy, automation)

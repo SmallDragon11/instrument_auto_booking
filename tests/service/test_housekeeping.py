@@ -104,3 +104,8 @@ def test_prune_snapshots_ignores_unlink_errors(tmp_path, monkeypatch):
         raise FileNotFoundError(2, "其他執行緒剛刪除", str(self))
     monkeypatch.setattr(Path, "unlink", unlink)
     prune_snapshots(tmp_path, keep=5)
+
+
+def test_describe_not_configured_shows_message_as_is():
+    from instrument_booking.service.settings import NotConfigured
+    assert describe_error(NotConfigured("請先完成設定：請填寫要寫入表格的名字")) == "請先完成設定：請填寫要寫入表格的名字"
