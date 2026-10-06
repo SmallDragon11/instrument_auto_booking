@@ -9,10 +9,13 @@ from instrument_booking.core.models import CellFont, CellState
 
 _TR = re.compile(r"<tr\b[^>]*>.*?</tr>", re.S)
 _TD = re.compile(r"<td\b([^>]*)>(.*?)</td>", re.S)
-_STYLE = re.compile(r'style="([^"]*)"')
+_TD_OPEN = re.compile(r"<td\b", re.I)
+_STYLE = re.compile(r'(?<!\S)style="([^"]*)"')  # 必須是完整的 style 屬性（不可匹配 data-x-style=）
 _TAG = re.compile(r"<[^>]+>")
 _RGB = re.compile(r"rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)")
-_REWRITTEN = ("background-color", "font-size", "font-weight", "text-align")
+_RGB_IN = re.compile(r"rgba?\([^)]*\)")
+_NO_FILL = {"none", "transparent", "initial", "unset"}
+_REWRITTEN = ("background-color", "background", "font-size", "font-weight", "text-align")
 
 
 class ClipboardFormatError(ValueError):
@@ -40,8 +43,28 @@ def _style_value(style: str, prop: str) -> str | None:
     return None
 
 
+def _background(style: str) -> str | None:
+    """底色：優先 background-color；沒有時改讀 background 簡寫中的 rgb(...)／rgba(...)。
+
+    兩者都沒有時回傳 None（無填色）——實測 Google 對無填色格的 <td> 不輸出任何底色樣式。
+    簡寫中沒有 rgb() 且不是 none／transparent 等無填色值（例如 #a4c2f4、漸層）→ 'unknown'。
+    """
+    color = _style_value(style, "background-color")
+    if color is not None:
+        return parse_rgb(color)
+    shorthand = _style_value(style, "background")
+    if shorthand is None:
+        return None
+    m = _RGB_IN.search(shorthand)
+    if m:
+        return parse_rgb(m.group(0))
+    if not shorthand or all(token.lower() in _NO_FILL for token in shorthand.split()):
+        return None
+    return "unknown"
+
+
 def _rows(html: str) -> list[tuple[str, str]]:
-    """每列第一個 <td> 的 (屬性字串, 內容)。不是表格就拋 ClipboardFormatError。"""
+    """每列唯一一個 <td> 的 (屬性字串, 內容)。不是單欄表格就拋 ClipboardFormatError。"""
     if "<table" not in html:
         raise ClipboardFormatError("剪貼簿內容不是表格")
     rows = []
@@ -49,6 +72,8 @@ def _rows(html: str) -> list[tuple[str, str]]:
         m = _TD.search(tr)
         if m is None:
             raise ClipboardFormatError("表格列中沒有儲存格")
+        if len(_TD_OPEN.findall(tr)) != 1:
+            raise ClipboardFormatError("表格列中有多個儲存格（只支援單欄範圍）")
         rows.append((m.group(1), m.group(2)))
     if not rows:
         raise ClipboardFormatError("表格沒有任何列")
@@ -72,7 +97,7 @@ def parse_cells(html: str) -> list[CellState]:
         m = _STYLE.search(attrs)
         style = html_lib.unescape(m.group(1)) if m else ""
         text = html_lib.unescape(_TAG.sub("", inner)).strip()
-        cells.append(CellState(value=text or None, color=parse_rgb(_style_value(style, "background-color"))))
+        cells.append(CellState(value=text or None, color=_background(style)))
     return cells
 
 

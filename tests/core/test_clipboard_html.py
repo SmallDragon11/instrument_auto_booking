@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 import pytest
@@ -64,8 +65,61 @@ def test_parse_unescapes_text_and_strips_tags():
 
 
 def test_missing_background_is_empty():
+    # 實測（spike/s8_probe.py，2026-10-06）：無填色的儲存格（例 202610!B19:B20、I16:I18），
+    # Google 複製出的 <td> 完全沒有 background-color／background；白色填色才是 rgb(255, 255, 255)。
+    # 無填色格在預約表中很常見，必須視為空白（不可改成佔用）。
     html = '<table><tbody><tr><td style="padding: 0px 3px;"></td></tr></tbody></table>'
     assert parse_cells(html) == [CellState(None, None)]
+
+
+@pytest.mark.parametrize("bg,expected", [
+    ("background: rgb(164,194,244)", "A4C2F4"),
+    ("background: rgb(164, 194, 244) none repeat scroll 0% 0%", "A4C2F4"),
+    ("background: rgba(164, 194, 244, 1)", "A4C2F4"),
+    ("background: rgb(255, 255, 255)", None),
+    ("background: none", None),
+    ("background: transparent", None),
+    ("background: #a4c2f4", "unknown"),
+    ("background: linear-gradient(red, blue)", "unknown"),
+])
+def test_background_shorthand(bg, expected):
+    html = f'<table><tbody><tr><td style="padding: 0px 3px; {bg};"></td></tr></tbody></table>'
+    assert parse_cells(html) == [CellState(None, expected)]
+
+
+def test_background_color_takes_precedence_over_shorthand():
+    html = ('<table><tbody><tr><td style="background: rgb(255, 0, 0); background-color: rgb(164, 194, 244);">'
+            '</td></tr></tbody></table>')
+    assert parse_cells(html) == [CellState(None, "A4C2F4")]
+
+
+def test_style_must_be_a_whole_attribute():
+    # data-x-style= 不是 style 屬性，不可當成底色來源
+    html = ('<table><tbody><tr><td data-x-style="background-color: rgb(164, 194, 244);" '
+            'style="padding: 0px 3px;"></td></tr></tbody></table>')
+    assert parse_cells(html) == [CellState(None, None)]
+    html = ('<table><tbody><tr><td data-x-style="background-color: rgb(255, 255, 255);" '
+            'style="background-color: rgb(164, 194, 244);"></td></tr></tbody></table>')
+    assert parse_cells(html) == [CellState(None, "A4C2F4")]
+
+
+def test_build_ignores_data_x_style():
+    src = ('<table><tbody><tr><td data-x-style="color: red;" style="padding: 0px 3px;"></td></tr>'
+           '</tbody></table>')
+    out = build_booking_html(src, color="A4C2F4", name="Zoe", fonts=[LAB_FONT])
+    assert 'data-x-style="color: red;"' in out
+    assert parse_cells(out) == [CellState("Zoe", "A4C2F4")]
+
+
+def test_row_with_several_cells_is_rejected():
+    # 只支援單欄範圍：一列有多個 <td>（例如選取被擴張成多欄）一律拒絕
+    html = ('<table><tbody><tr><td style="background-color: rgb(255, 255, 255);"></td>'
+            '<td style="background-color: rgb(164, 194, 244);">X</td></tr></tbody></table>')
+    with pytest.raises(ClipboardFormatError):
+        parse_cells(html)
+    with pytest.raises(ClipboardFormatError):
+        build_booking_html(html, color="A4C2F4", name="Zoe", fonts=[LAB_FONT])
+    assert count_rows(html) == 0
 
 
 def test_drop_last_row():
@@ -120,3 +174,34 @@ def test_build_booking_html_row_count_must_match_fonts():
 def test_build_booking_html_rejects_span():
     with pytest.raises(ClipboardFormatError):
         build_booking_html(fixture("single_cell_span.html"), color="A4C2F4", name="Zoe", fonts=[LAB_FONT])
+
+
+def _td_styles(html: str) -> list[str]:
+    return re.findall(r'<td\b[^>]*\bstyle="([^"]*)"', html)
+
+
+def test_build_booking_html_with_unset_font_size_and_alignment():
+    out = build_booking_html(fixture("booked_5rows.html"), color="A4C2F4", name="Zoe",
+                             fonts=[CellFont(None, False, None)] * 5)
+    styles = _td_styles(out)
+    assert len(styles) == 5
+    for style in styles:
+        assert "font-size" not in style      # 原第一格的 12pt 也要移除
+        assert "text-align" not in style
+        assert "font-weight: normal;" in style
+
+
+def test_build_booking_html_adds_style_to_td_without_one():
+    src = '<table><tbody><tr><td>X</td></tr><tr><td></td></tr></tbody></table>'
+    out = build_booking_html(src, color="A4C2F4", name="Zoe", fonts=[LAB_FONT] * 2)
+    assert _td_styles(out) == ["background-color: rgb(164, 194, 244); font-size: 12pt; font-weight: bold; "
+                               "text-align: center;"] * 2
+    assert parse_cells(out) == [CellState("Zoe", "A4C2F4"), CellState(None, "A4C2F4")]
+
+
+def test_build_replaces_background_shorthand():
+    src = ('<table><tbody><tr><td style="padding: 0px 3px; background: rgb(255, 255, 255);"></td></tr>'
+           '</tbody></table>')
+    out = build_booking_html(src, color="A4C2F4", name="Zoe", fonts=[LAB_FONT])
+    assert "background:" not in out
+    assert parse_cells(out) == [CellState("Zoe", "A4C2F4")]
