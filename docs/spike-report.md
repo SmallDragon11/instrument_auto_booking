@@ -76,3 +76,11 @@
 ## 清理
 
 測試寫入（V54–V56、U54–U56、R57–R59、Q60–Q66，以及被誤清除格式的 S56）已由使用者以版本記錄還原至測試前版本。
+
+## 追加：Edge 最小化在背景執行（2026-10-06，spike/s9、s10）
+
+使用者決定自動預約時 Edge 最小化在背景，避免搶走焦點。對測試副本實測：
+
+- 啟動參數 `--start-minimized`、`--disable-background-timer-throttling`、`--disable-renderer-backgrounding`、`--disable-backgrounding-occluded-windows`，再以 CDP `Browser.setWindowBounds {windowState: "minimized"}` 最小化：**前景視窗全程未被搶走**，視窗維持 minimized。
+- 最小化時 Playwright 的 `locator.click()` 會因「element is not stable」逾時（最小化時畫面不更新）→ **名稱方塊改為直接 `fill` 後按 Enter（不點擊）**。
+- 改用 `fill` 後，最小化狀態下唯讀讀取 24 次全部成功：同一工作表 0.16–0.2 秒、切換工作表約 0.5 秒（含 0.3 秒載入等待）；最小化時貼上與 Ctrl+Z 復原也正常（寫入 U63 後已復原並確認為空）。
