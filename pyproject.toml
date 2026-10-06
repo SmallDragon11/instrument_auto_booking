@@ -2,7 +2,7 @@
 name = "instrument-booking"
 version = "0.1.0"
 requires-python = ">=3.13"  # 3.13 前 Windows 的 time.monotonic 解析度為 15.6 毫秒，會吃掉 NTP 0.05 秒餘量的大部分
-dependencies = ["openpyxl>=3.1"]
+dependencies = ["openpyxl>=3.1", "playwright>=1.50"]
 
 [project.optional-dependencies]
 dev = ["pytest>=8"]
@@ -17,3 +17,4 @@ where = ["src"]
 [tool.pytest.ini_options]
 pythonpath = ["src", "tests"]
 testpaths = ["tests"]
+markers = ["live: 對測試副本的實機整合測試（需手動設定環境變數）"]
