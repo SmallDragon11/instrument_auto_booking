@@ -125,7 +125,7 @@ class JsonStore:
     # --- 氣體圖例快取（離線也能編輯）---
     def load_legend(self) -> dict[str, str]:
         data = self._read(self.root / "legend.json")
-        return {} if data is None else dict(data)
+        return {} if data is None else self._convert(dict, data, "legend.json")
 
     def save_legend(self, legend: dict[str, str]) -> None:
         self._write(self.root / "legend.json", legend)

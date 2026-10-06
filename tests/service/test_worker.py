@@ -44,7 +44,7 @@ def test_keep_open_reuses_session_until_a_closing_job(setup):
     assert len(sessions) == 1
 
 
-def test_job_failure_closes_session_and_propagates(setup):
+def test_failed_keep_open_job_leaves_session_for_next_job(setup):
     worker, log, _ = setup
 
     def boom(s):
@@ -53,6 +53,16 @@ def test_job_failure_closes_session_and_propagates(setup):
         worker.submit(boom, keep_open=True).result()
     worker.submit(lambda s: None).result()
     assert [e for e, _ in log] == ["start", "close"]  # keep_open 的工作失敗時不關閉，下一個工作沿用
+
+
+def test_failed_job_without_keep_open_closes_browser(setup):
+    worker, log, _ = setup
+
+    def boom(s):
+        raise RuntimeError("下載失敗")
+    with pytest.raises(RuntimeError):
+        worker.submit(boom).result()
+    assert [e for e, _ in log] == ["start", "close"]  # 失敗也不會留下開著的 Edge
 
 
 def test_start_failure_propagates_and_next_job_retries():

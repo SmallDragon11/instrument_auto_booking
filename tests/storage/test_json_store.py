@@ -86,3 +86,9 @@ def test_corrupted_booking_raises_store_error(tmp_path):
     (tmp_path / "bookings" / "2026-10-12.json").write_text('{"requests": [{"id": "a"}]}', encoding="utf-8")
     with pytest.raises(StoreError, match="損毀"):
         JsonStore(tmp_path).load_bookings(MON)
+
+
+def test_corrupted_legend_raises_store_error(tmp_path):
+    (tmp_path / "legend.json").write_text('["不是物件"]', encoding="utf-8")
+    with pytest.raises(StoreError, match="legend.json"):
+        JsonStore(tmp_path).load_legend()
