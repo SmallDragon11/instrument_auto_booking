@@ -34,3 +34,29 @@
 - `core/job.py` 的 `SheetWriter.read_range` docstring 仍寫「多選下一列」，實作在 23:00 改為多讀上一列 → 更新文字。
 - 非 TargetClosed 的 Playwright／JS 錯誤目前一律視為 WriterCrashed（安全但會重啟瀏覽器、較慢）。
 - EDGE_PATH 寫死在 Program Files (x86)、無備援；`start()` 重複呼叫會洩漏前一個 Playwright；底稿沒有時效限制；快照檔不會自動清理（每個約 3.4 MB）；登入偵測要等滿 60 秒。
+
+## Plan 03（服務層）完成後新增（2026-10-07）
+
+### Plan 03 文件之後的介面變更（Plan 04 請以程式碼為準）
+
+- `RunRecord.preflight_error` 已改名為 `error`；新增 `snapshot_at`；`started_at` 為開始寫入的時間；`late` 依實際寫入時間判斷。
+- `JsonStore.save_settings(s, now=None)` 會在星期或時間改變時記錄 `schedule_since()`（GUI 呼叫時不要傳 `now`）；`JsonStore.corrupt_runs()` 回傳被隔離的損毀紀錄檔名（GUI 應顯示警告）。存檔已跨執行緒安全，失敗一律為 `StoreError`。
+- `AutomationService.status() -> ServiceStatus`（不阻塞；phase、run_at、target_monday、retry_at、last_error、service_error、editing_locked）、`cancel_current()`、`upcoming(now, settings, store)`；`OccupancyService` 不再接受 `file_id`（改讀設定，設定無效時拋 `NotConfigured`）；`start_login` 設定無效時拋 `NotConfigured`、網址空白時開 Google 登入頁。
+- 取消語意：因設定變更而在寫入前取消 → 不記錄、不算已執行，依新設定重新排程（通知「自動預約已延後」）；手動取消 → 記錄並算已執行。
+
+### Plan 04 必須做到
+
+- `status().editing_locked` 為 True（T−10 到寫入結束）時：鎖定該週清單編輯與「重新登入」按鈕並說明原因；只有 `run_at` 不為 None 時才提供「取消本次預約」（避免延後後 1 秒內的取消被丟棄）。
+- `DONE` 只維持約 1 秒、`last_error` 會在下一週期清除 → 執行紀錄頁與「上次結果」一律讀 `load_runs()`。
+- `upcoming()`、`load_runs()` 會讀檔（可能重試），GUI 不可在 GUI 執行緒頻繁呼叫；放在背景或快取。
+- 所有阻塞呼叫（`OccupancyService.refresh`、`run_connection_test`、`start_login`、`Services.shutdown`）都不可在 GUI 執行緒；Notifier 以 Qt signal 轉到 GUI 執行緒顯示系統匣通知。
+- 結束程式：先停止自動化執行緒（stop.set()），再在背景 `Services.shutdown()`；T−10 到寫入結束期間結束程式要警告。
+- 單一執行個體（第二個實例會搶同一個 Edge 設定檔與排程）。
+- 提醒使用者：開放時間前後 App 會使用系統剪貼簿，請勿同時複製貼上。
+- 自動化服務持續出錯或設定無效時，顯示常駐提示（通知只發一次）。
+
+### 延後的小問題（非阻擋）
+
+- 預檢後修改清單（保留 Edge）且同一秒手動取消 → 待命的 Edge 不會被關閉（`_cancel_cycle` 的 had_plan 判斷）；`step()` 在該時點拋例外時亦同。
+- 被隔離的損毀紀錄不再算已執行 → 該週可能補跑一次（不會覆寫，使用者會收到第二次通知）。
+- storage 依賴 service.settings 的分層、渲染卡死的看門狗、設定檔被占用的專屬提示。
