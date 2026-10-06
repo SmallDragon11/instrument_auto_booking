@@ -7,6 +7,7 @@ from instrument_booking.core.models import CellFont, CellState
 
 WHITE = "FFFFFF"
 MERGED = "merged"
+UNKNOWN = "unknown"
 
 
 def normalize_rgb(rgb: str) -> str:
@@ -21,8 +22,10 @@ def cell_state(cell) -> CellState:
     fill = cell.fill
     color = None
     if fill is not None and fill.fill_type is not None:
-        fg = fill.fgColor
-        if fg.type == "rgb":
+        fg = getattr(fill, "fgColor", None)
+        if fg is None:
+            color = UNKNOWN  # 漸層填色等沒有 fgColor 的填色
+        elif fg.type == "rgb":
             rgb = normalize_rgb(fg.rgb)
             color = None if rgb == WHITE else rgb
         elif fg.type == "theme":

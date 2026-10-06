@@ -106,3 +106,8 @@ def test_now_in_other_timezone_is_compared_in_taipei(wb):
     p = plan_for(wb, tube("past", 12, 13), tube("future", 13, 14), now=now)
     assert [w.request.id for w in p.writes] == ["future"]
     assert [r.request_id for r in p.skipped] == ["past"]
+
+
+def test_duplicate_request_ids_are_rejected(wb):
+    with pytest.raises(ValueError, match="t1"):
+        plan_for(wb, tube("t1", 13, 17), tube("t1", 18, 20))

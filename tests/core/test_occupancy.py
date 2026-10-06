@@ -1,6 +1,6 @@
 import pytest
 from openpyxl import Workbook
-from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.styles import Alignment, Font, GradientFill, PatternFill
 from openpyxl.styles.colors import Color
 
 from instrument_booking.core.models import CellFont, CellState
@@ -83,3 +83,10 @@ def test_cell_font_default(ws):
 def test_cell_font_merged_inner_cell(ws):
     ws.merge_cells("B6:B7")
     assert cell_font(ws["B7"]) == CellFont(None, False, None)
+
+
+def test_gradient_fill_is_occupied(ws):
+    ws["B6"].fill = GradientFill(stop=("FFFFFF", "FFFFFF"))  # 漸層沒有 fgColor，即使是白色也視為已佔用
+    s = cell_state(ws["B6"])
+    assert s.color == "unknown"
+    assert not is_empty(s)

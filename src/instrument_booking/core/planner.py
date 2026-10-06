@@ -46,8 +46,12 @@ def describe_busy(target: Target, cells: Sequence[CellState]) -> str | None:
 
 
 def make_plan(wb, index: SheetIndex, requests: Sequence[BookingRequest], now: datetime) -> Plan:
-    """now 必須帶時區（換算為台北時間比較；時段一律是台北時間）。"""
+    """now 必須帶時區（換算為台北時間比較；時段一律是台北時間）；requests 的 id 不可重複。"""
     now = to_taipei(now)
+    ids = [r.id for r in requests]
+    duplicates = sorted({i for i in ids if ids.count(i) > 1})
+    if duplicates:
+        raise ValueError(f"預約編號重複：{'、'.join(duplicates)}")
     writes: list[PlannedWrite] = []
     skipped: list[ItemResult] = []
     for req in requests:
