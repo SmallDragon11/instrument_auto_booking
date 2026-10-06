@@ -2,7 +2,7 @@
 from datetime import date
 
 from instrument_booking.browser.sheets_writer import BrowserSheetWriter
-from instrument_booking.core.job import WriterCrashed, execute
+from instrument_booking.core.job import WriterCrashed, WriterError, execute
 from instrument_booking.core.models import BookingRequest, CellFont, CellState, Instrument, ItemStatus
 from instrument_booking.core.planner import Plan, PlannedWrite
 from instrument_booking.core.sheet_locator import Target
@@ -81,3 +81,25 @@ def test_last_slot_of_day_next_to_merged_date_row():
     assert r.status is ItemStatus.SUCCESS
     assert page.cells[("202610", "U20")] == CellState("Zoe", "A4C2F4")
     assert page.cells[("202610", "U19")] == CellState("Ping", "FDE49A")
+
+
+def test_paste_that_landed_before_the_error_is_recognised_on_retry():
+    page = FakeSheetPage()
+    original_press = page.press
+    failed = []
+
+    def press(keys):
+        original_press(keys)
+        if keys == "Control+V" and not failed:  # Ctrl+V 實際已貼上，之後才拋錯（例如回應逾時）
+            failed.append(keys)
+            raise WriterError("操作逾時")
+    page.press = press
+    restarts = []
+    results = run([planned("a", 2, 10, 13),
+                   planned("b", 2, 12, 13, start=15, end=17)],  # 與 a 重疊的低順位
+                  page, restart=lambda: restarts.append(1) or page)
+    assert [r.status for r in results] == [ItemStatus.SUCCESS, ItemStatus.SELF_OVERLAP]
+    assert restarts == [1]                     # 狀態不明 → recover 一次
+    assert len(page.pasted) == 1               # 重試時讀到自己的內容，不再重貼
+    assert page.cells[("202610", "B10")] == CellState("Zoe", "A4C2F4")
+    assert "a" in results[1].reason
