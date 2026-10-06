@@ -71,3 +71,13 @@ def test_someone_else_pastes_after_us_is_suspected_clash():
     (r,) = run([planned("a", 2, 10, 13)], page)
     assert r.status is ItemStatus.SUSPECTED_CLASH
     assert "Rolling" in r.reason
+
+
+def test_last_slot_of_day_next_to_merged_date_row():
+    page = FakeSheetPage()
+    page.merged_rows["202610"] = {21}  # 23:00 那格的下一列是下一週合併的日期列
+    page.cells[("202610", "U19")] = CellState("Ping", "FDE49A")
+    (r,) = run([planned("a", 21, 20, 20, start=23, end=24)], page)
+    assert r.status is ItemStatus.SUCCESS
+    assert page.cells[("202610", "U20")] == CellState("Zoe", "A4C2F4")
+    assert page.cells[("202610", "U19")] == CellState("Ping", "FDE49A")

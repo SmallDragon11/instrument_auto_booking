@@ -110,6 +110,15 @@ def drop_last_row(html: str) -> str:
     return html[:last.start()] + html[last.end():]
 
 
+def drop_first_row(html: str) -> str:
+    """刪除表格第一列（單格範圍改為多讀上一列時使用，例如當天最後一格）。"""
+    trs = list(_TR.finditer(html))
+    if len(trs) < 2:
+        raise ClipboardFormatError("表格少於 2 列，無法刪除第一列")
+    first = trs[0]
+    return html[:first.start()] + html[first.end():]
+
+
 def _font_css(font: CellFont) -> str:
     parts = []
     if font.size is not None:

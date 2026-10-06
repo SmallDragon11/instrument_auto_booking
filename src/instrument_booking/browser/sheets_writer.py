@@ -11,6 +11,7 @@ from instrument_booking.core.clipboard_html import (
     ClipboardFormatError,
     build_booking_html,
     count_rows,
+    drop_first_row,
     drop_last_row,
     parse_cells,
 )
@@ -21,6 +22,23 @@ LOAD_WAIT_MS = 300        # 切換工作表後等待載入（Spike：約 0.3 秒
 RETRY_WAIT_MS = 150       # 讀取不正確時，重試前等待
 CLIPBOARD_POLLS = 20      # Ctrl+C 後輪詢剪貼簿的次數
 CLIPBOARD_POLL_MS = 30
+
+
+class _SelectionExpanded(Exception):
+    """名稱方塊顯示的範圍列相同、但欄位被擴張（選取碰到合併儲存格，例 U20:U21 → T20:V21）。"""
+
+
+def _widened(box: str, a1: str) -> bool:
+    """box 是否為 a1 列相同、欄位向左右擴張後的範圍。"""
+    try:
+        bounds = range_boundaries(box)
+    except ValueError:
+        return False
+    if None in bounds:
+        return False
+    bc1, br1, bc2, br2 = bounds
+    c1, r1, c2, r2 = range_boundaries(a1)
+    return (br1, br2) == (r1, r2) and bc1 <= c1 and c2 <= bc2 and (bc1, bc2) != (c1, c2)
 
 
 class BrowserSheetWriter:
@@ -49,19 +67,31 @@ class BrowserSheetWriter:
         col1, row1, col2, row2 = range_boundaries(a1)
         if col1 != col2:
             raise WriterError(f"只支援單欄範圍：{a1}")
-        rows = row2 - row1 + 1
-        col = get_column_letter(col1)
-        # 單格複製只會得到沒有底色的 <span> → 多選下一列，之後再刪掉
-        copy_a1 = a1 if rows > 1 else f"{col}{row1}:{col}{row1 + 1}"
-        html = self._copy(sheet, copy_a1, max(rows, 2))
         try:
-            if rows == 1:
-                html = drop_last_row(html)
+            if row1 == row2:
+                html = self._copy_single(sheet, get_column_letter(col1), row1)
+            else:
+                html = self._copy(sheet, a1, row2 - row1 + 1)
             cells = parse_cells(html)
+        except _SelectionExpanded as e:
+            raise WriterError(f"選取 '{sheet}'!{e} 時被合併儲存格擴張，無法讀取 {a1}") from e
         except ClipboardFormatError as e:
             raise WriterError(f"無法解析 '{sheet}'!{a1} 的內容：{e}") from e
         self._draft = (sheet, a1, html)
         return cells
+
+    def _copy_single(self, sheet: str, col: str, row: int) -> str:
+        """單格複製只會得到沒有底色的 <span> → 多選一列（2 列表格），再刪掉多讀的那一列。
+
+        先選「本格＋下一列」；若下一列是合併儲存格（例如當天 23:00 那格的下一列是下一週的日期列，
+        選取會被擴張成整天三欄），立刻改選「上一列＋本格」，讀取後刪除第一列。
+        """
+        try:
+            return drop_last_row(self._copy(sheet, f"{col}{row}:{col}{row + 1}", 2))
+        except _SelectionExpanded:
+            if row == 1:
+                raise WriterError(f"'{sheet}'!{col}{row} 的下一列是合併儲存格，且沒有上一列可多讀") from None
+        return drop_first_row(self._copy(sheet, f"{col}{row - 1}:{col}{row}", 2))
 
     def paste_booking(self, sheet: str, a1: str, color: str, name: str, fonts: Sequence[CellFont]) -> None:
         draft, self._draft = self._draft, None  # 底稿只能用一次：任何結果（含拒絕）都先取走
@@ -99,7 +129,10 @@ class BrowserSheetWriter:
         while True:
             self._page.write_clipboard(None, "")  # 先清空，避免讀到舊內容
             self._page.jump(f"'{sheet}'!{a1}")
-            if self._page.active_sheet() == sheet and self._page.name_box() == a1:
+            box = self._page.name_box() if self._page.active_sheet() == sheet else None
+            if box is not None and _widened(box, a1):
+                raise _SelectionExpanded(a1)  # 再試也一樣：交給呼叫端立刻改選其他範圍
+            if box == a1:
                 if sheet != self._loaded_sheet:
                     self._page.wait(LOAD_WAIT_MS)  # 剛切換工作表：等表格載入後再複製
                     self._loaded_sheet = sheet

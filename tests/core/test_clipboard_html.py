@@ -7,6 +7,7 @@ from instrument_booking.core.clipboard_html import (
     ClipboardFormatError,
     build_booking_html,
     count_rows,
+    drop_first_row,
     drop_last_row,
     parse_cells,
     parse_rgb,
@@ -132,6 +133,24 @@ def test_drop_last_row_needs_two_rows():
     one = drop_last_row(drop_last_row(fixture("empty_3rows.html")))
     with pytest.raises(ClipboardFormatError):
         drop_last_row(one)
+
+
+def test_drop_first_row():
+    src = fixture("booked_5rows.html")
+    html = drop_first_row(src)
+    assert count_rows(html) == 4
+    assert parse_cells(html) == [CellState(None, "A4C2F4")] * 4  # 原第一列（X）被刪除
+    assert html.startswith(src[:src.index("<tbody>") + len("<tbody>")])
+    assert html.endswith("</tbody></table></google-sheets-html-origin>")
+
+
+def test_drop_first_row_needs_two_rows():
+    one = drop_first_row(drop_first_row(fixture("empty_3rows.html")))
+    assert count_rows(one) == 1
+    with pytest.raises(ClipboardFormatError):
+        drop_first_row(one)
+    with pytest.raises(ClipboardFormatError):
+        drop_first_row(fixture("single_cell_span.html"))
 
 
 def test_build_booking_html_rewrites_colour_name_and_fonts():

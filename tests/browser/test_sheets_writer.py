@@ -235,3 +235,66 @@ def test_refused_early_paste_drops_the_draft():
     with pytest.raises(WriterError, match="底稿"):
         writer.paste_booking("202610", "B10:B11", "A4C2F4", "Zoe", [LAB, LAB])
     assert page.pasted == []
+
+
+# ── 23:00 單格：下一列是下一週合併的日期列（實測：選 U20:U21 → 名稱方塊顯示 T20:V21）──
+
+def test_fake_expands_selection_over_merged_row():
+    page = FakeSheetPage()
+    page.merged_rows["202610"] = {21}
+    page.jump("'202610'!U20:U21")
+    assert page.name_box() == "T20:V21"
+    page.jump("'202610'!U19:U20")
+    assert page.name_box() == "U19:U20"
+
+
+def test_last_slot_of_day_reads_previous_row_instead():
+    writer, page = make()
+    page.merged_rows["202610"] = {21}
+    page.cells[("202610", "U19")] = CellState("Ping", "FDE49A")  # 多讀的上一列不可影響結果
+    page.cells[("202610", "U20")] = CellState(None, "A4C2F4")
+    page.cells[("202610", "U21")] = CellState("2026/10/19", None)
+    assert writer.read_range("202610", "U20:U20") == [CellState(None, "A4C2F4")]
+    jumps = [e[1] for e in page.log if e[0] == "jump"]
+    assert jumps == ["'202610'!U20:U21", "'202610'!U19:U20"]  # 被擴張後立刻改選上一列＋本格
+    assert [e for e in page.log if e[0] == "press"] == [("press", "Control+C")]  # 只按一次有效的 Ctrl+C
+    assert page.elapsed == pytest.approx(0.3)  # 只有切換工作表的等待，沒有等到逾時
+
+
+def test_last_slot_paste_targets_only_the_cell():
+    writer, page = make()
+    page.merged_rows["202610"] = {21}
+    writer.read_range("202610", "U20:U20")
+    writer.paste_booking("202610", "U20:U20", "A4C2F4", "Zoe", [LAB])
+    sheet, first, html = page.pasted[-1]
+    assert (sheet, first) == ("202610", "U20")
+    assert count_rows(html) == 1
+    assert page.cells[("202610", "U20")] == CellState("Zoe", "A4C2F4")
+    assert ("202610", "U19") not in page.cells  # 多讀的上一列沒有被寫入
+
+
+def test_cell_between_two_merged_rows_is_refused():
+    writer, page = make()
+    page.merged_rows["202610"] = {19, 21}  # 理論上不會發生：上下兩列都被合併
+    with pytest.raises(WriterError):
+        writer.read_range("202610", "U20:U20")
+    assert [e for e in page.log if e[0] == "press"] == []
+    assert page.elapsed < 1.0  # 不等到逾時
+
+
+def test_first_row_with_merged_next_row_is_refused():
+    writer, page = make()
+    page.merged_rows["202610"] = {2}
+    with pytest.raises(WriterError):
+        writer.read_range("202610", "U1:U1")
+    assert [e for e in page.log if e[0] == "press"] == []
+    assert page.elapsed < 1.0
+
+
+def test_expanded_multi_row_range_fails_fast():
+    writer, page = make()
+    page.merged_rows["202610"] = {21}
+    with pytest.raises(WriterError):
+        writer.read_range("202610", "U19:U21")
+    assert [e for e in page.log if e[0] == "press"] == []
+    assert page.elapsed < 1.0
