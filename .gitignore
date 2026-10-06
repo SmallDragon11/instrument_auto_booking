@@ -24,3 +24,6 @@ service_account*.json
 
 # 腦力激盪視覺輔助暫存
 .superpowers/
+
+# spike 輸出（可能含實驗室成員名字）
+spike/output/
