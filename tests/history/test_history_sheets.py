@@ -5,6 +5,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from instrument_booking.core.legend import oven_color, read_tube_legend
 from instrument_booking.core.models import BookingRequest, Instrument
 from instrument_booking.core.sheet_locator import ALL_HOURS, SUB_COUNT, AmbiguousDate, SheetIndex, sheet_kind
 
@@ -78,3 +79,16 @@ def test_inserted_row_in_202609_is_covered(index):
 
 def test_cross_month_week_belongs_to_previous_sheet(index):
     assert index.day("tube", date(2026, 10, 1)).sheet == "202609"
+
+
+def test_every_tube_sheet_legend_has_base_gases(wb):
+    base = {"H2", "O2", "Ar", "vac", "air", "MILA"}
+    for title in month_sheets(wb):
+        if sheet_kind(title) == "tube":
+            assert base <= set(read_tube_legend(wb[title])), title
+
+
+def test_every_oven_sheet_resolves_standard_colors(wb):
+    for title in month_sheets(wb):
+        if sheet_kind(title) == "oven":
+            assert (oven_color(wb[title], 0), oven_color(wb[title], 1)) == ("FFE599", "A4C2F4"), title
