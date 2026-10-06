@@ -98,8 +98,8 @@ class PlaywrightSheetPage:
 
     @_translate
     def jump(self, ref: str) -> None:
+        # 不點擊：Edge 最小化時畫面不更新，click 會因「元素不穩定」逾時；fill 會自動取得焦點（見 spike-report 追加）
         box = self._page.locator(NAME_BOX)
-        box.click()
         box.fill(ref)
         box.press("Enter")
 

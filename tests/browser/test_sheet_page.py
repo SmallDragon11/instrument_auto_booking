@@ -78,7 +78,7 @@ class FakeRawPage:
 def test_jump_types_into_name_box():
     raw = FakeRawPage()
     PlaywrightSheetPage(raw).jump("'202610'!B10:B13")
-    assert raw.calls == ["click", ("fill", "'202610'!B10:B13"), ("box-press", "Enter")]
+    assert raw.calls == [("fill", "'202610'!B10:B13"), ("box-press", "Enter")]  # 不點擊（最小化時 click 會逾時）
 
 
 def test_name_box_and_keys_and_wait():
