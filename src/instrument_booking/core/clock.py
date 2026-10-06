@@ -7,12 +7,16 @@ offset 一律取「保守下界」：單調時鐘＋offset ≤ 真實 epoch 時�
 from __future__ import annotations
 
 import email.utils
+import http.client
+import os
 import socket
 import struct
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import timezone
 from enum import Enum
+from http.client import HTTPException
 from typing import Callable
 
 NTP_EPOCH_DELTA = 2_208_988_800  # 1900-01-01 → 1970-01-01
@@ -43,13 +47,25 @@ def ntp_offset(t1: float, t2: float, t3: float, t4: float) -> tuple[float, float
     return offset, delay
 
 
-def build_ntp_request() -> bytes:
-    return b"\x1b" + 47 * b"\0"  # LI=0、VN=3、Mode=3（client）
+def build_ntp_request(nonce: bytes = bytes(8)) -> bytes:
+    """LI=0、VN=3、Mode=3（client）；nonce 放在 transmit timestamp，伺服器會在 originate 原樣回傳。"""
+    return b"\x1b" + 39 * b"\0" + nonce
 
 
-def parse_ntp_response(data: bytes) -> tuple[float, float]:
+def parse_ntp_response(data: bytes, nonce: bytes | None = None) -> tuple[float, float]:
     if len(data) < 48:
         raise ValueError("NTP 回應長度不足")
+    li, mode, stratum = data[0] >> 6, data[0] & 0x07, data[1]
+    if li == 3:
+        raise ValueError("NTP 伺服器未同步")
+    if mode != 4:
+        raise ValueError(f"NTP 回應模式錯誤：{mode}")
+    if not 1 <= stratum <= 15:
+        raise ValueError(f"NTP 回應 stratum 不合法：{stratum}")
+    if nonce is not None and data[24:32] != nonce:
+        raise ValueError("NTP 回應與請求不符")
+    if data[32:40] == bytes(8) or data[40:48] == bytes(8):
+        raise ValueError("NTP 回應時間戳為零")
 
     def ts(offset: int) -> float:
         sec, frac = struct.unpack("!II", data[offset:offset + 8])
@@ -60,15 +76,17 @@ def parse_ntp_response(data: bytes) -> tuple[float, float]:
 
 def query_ntp(host: str = "time.google.com", timeout: float = 2.0, *,
               now: Callable[[], float] = time.monotonic, sock_factory=socket.socket) -> ClockSync:
+    nonce = os.urandom(8)
     with sock_factory(socket.AF_INET, socket.SOCK_DGRAM) as sock:
         sock.settimeout(timeout)
         t1 = now()
-        sock.sendto(build_ntp_request(), (host, 123))
+        sock.sendto(build_ntp_request(nonce), (host, 123))
         data, _ = sock.recvfrom(1024)
         t4 = now()
-    t2, t3 = parse_ntp_response(data)
+    t2, t3 = parse_ntp_response(data, nonce)
     offset, delay = ntp_offset(t1, t2, t3, t4)
-    # 真實時鐘差落在 offset ± delay/2 之內 → 取下界
+    # 下界 offset − delay/2 在代數上恆等於 t3 − t4：伺服器送出回應（t3）必早於本機收到（t4），
+    # 只要 t3 是誠實的伺服器時間（已由封包驗證把關），此下界與 delay 的正負無關。
     return ClockSync(ClockSource.NTP, offset - delay / 2)
 
 
@@ -83,9 +101,13 @@ def query_http_date(url: str = "https://www.google.com/generate_204", timeout: f
     fetch = fetch or _fetch_date_header
     header = fetch(url, timeout)
     t4 = now()
+    if not header:
+        raise ValueError("回應沒有 Date 標頭")
     # Date 只到秒且為捨去：產生標頭的真實時間 ≥ D，且發生在本機收到回應（t4）之前 → 下界 D − t4
-    server_floor = email.utils.parsedate_to_datetime(header).timestamp()
-    return ClockSync(ClockSource.HTTP_DATE, server_floor - t4)
+    server_dt = email.utils.parsedate_to_datetime(header)
+    if server_dt.tzinfo is None:  # 「-0000」會得到 naive datetime；HTTP Date 一律是 UTC
+        server_dt = server_dt.replace(tzinfo=timezone.utc)
+    return ClockSync(ClockSource.HTTP_DATE, server_dt.timestamp() - t4)
 
 
 def local_sync() -> ClockSync:
@@ -99,7 +121,7 @@ def sync_clock(ntp: Callable[[], ClockSync] = query_ntp,
     for attempt in (ntp, http):
         try:
             return attempt()
-        except (OSError, ValueError, TypeError):
+        except (OSError, ValueError, TypeError, HTTPException):
             continue
     return local()
 
