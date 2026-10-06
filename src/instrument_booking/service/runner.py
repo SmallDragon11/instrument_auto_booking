@@ -25,6 +25,13 @@ class RunnerError(Exception):
     """為安全起見拒絕預檢或寫入（訊息為給使用者看的繁體中文）。"""
 
 
+class RunCancelled(RunnerError):
+    """寫入前被 guard 取消（訊息＝取消原因）；此時尚未寫入任何東西。"""
+
+
+Guard = Callable[[], "str | None"]  # 回傳取消原因（字串）＝取消；None＝繼續
+
+
 URL_CHANGED = "預約表網址在預檢之後被改變，為安全起見不寫入"
 
 
@@ -80,16 +87,33 @@ class BookingRunner:
         prune_snapshots(self._snapshot_dir)
         return Prepared(plan, sync, clock, now, file_id)
 
-    def run(self, prepared: Prepared, settings: Settings, run_at: datetime) -> tuple[ItemResult, ...]:
-        """預熱、等到開放時間＋安全餘量、依優先序寫入並驗證；結束後關閉瀏覽器。"""
+    def run(self, prepared: Prepared, settings: Settings, run_at: datetime, *,
+            guard: Guard | None = None) -> tuple[ItemResult, ...]:
+        """預熱、等到開放時間＋安全餘量、依優先序寫入並驗證；結束後關閉瀏覽器。
+
+        guard（在瀏覽器執行緒呼叫）：job 一開始、以及等待開放時間期間的每個刻度都會檢查；
+        回傳取消原因時拋 RunCancelled，此時尚未寫入任何東西。開放時間一到就不再檢查，寫入不會被中斷。
+        """
         not_before = fire_at(run_at, prepared.sync)
 
+        def check() -> None:
+            if guard is not None and (reason := guard()):
+                raise RunCancelled(reason)
+
+        def guarded_sleep(seconds: float) -> None:
+            # execute 的 wait_until 只在開放時間前呼叫 sleep；寫入後的驗證等待也會呼叫 sleep，
+            # 但那時已過開放時間，不可再檢查（寫入已發生，取消只會讓結果無法回報）
+            if prepared.clock.now() < not_before:
+                check()
+            self._sleep(seconds)
+
         def job(session):
+            check()
             if _session_file_id(session) != prepared.file_id:
                 raise RunnerError(URL_CHANGED)  # 規劃是依另一份試算表的快照做的，絕不寫入
             writer = self._writer_factory(session.sheet_page(), restart=session.restart_sheet_page,
                                           clock=prepared.clock, not_before=not_before)
-            return execute(prepared.plan, writer, settings.name, prepared.clock, not_before, sleep=self._sleep)
+            return execute(prepared.plan, writer, settings.name, prepared.clock, not_before, sleep=guarded_sleep)
 
         return tuple(self._worker.submit(job, keep_open=False, hold=False).result())
 

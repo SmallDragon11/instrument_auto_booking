@@ -10,7 +10,7 @@ from instrument_booking.core.clock import Clock, ClockSource, ClockSync
 from instrument_booking.core.models import TAIPEI, BookingRequest, Instrument, ItemResult, ItemStatus
 from instrument_booking.core.planner import Plan
 from instrument_booking.service.automation import AutomationService, summarize
-from instrument_booking.service.runner import Prepared
+from instrument_booking.service.runner import Prepared, RunCancelled
 from instrument_booking.service.settings import Settings
 from instrument_booking.storage.json_store import JsonStore, StoreError
 
@@ -31,13 +31,15 @@ def t(hh, mm, ss=0, day=9):
 class FakeRunner:
     """offset＝真實時間 − 本機時鐘（秒）；local_now 由 env 的 make() 接到測試用的本機時鐘。"""
 
-    def __init__(self, prepare_errors=(), run_result=OK, run_error=None, offset=0.0):
+    def __init__(self, prepare_errors=(), run_result=OK, run_error=None, offset=0.0, while_waiting=()):
         self.prepare_errors = list(prepare_errors)
         self.run_result, self.run_error = run_result, run_error
         self.offset = offset
         self.local_now = time_module.time
         self.calls = []
         self.ran_with = []  # run 收到的 Prepared
+        self.while_waiting = list(while_waiting)  # 等待開放時間期間依序發生的事（每件之後檢查一次 guard）
+        self.guard_results = []
 
     def prepare(self, settings, requests):
         self.calls.append(("prepare", tuple(requests)))
@@ -47,9 +49,17 @@ class FakeRunner:
         return Prepared(Plan((), (), ()), sync, Clock(sync, lambda: self.local_now()), t(12, 50),
                         file_id_from_url(settings.spreadsheet_url))
 
-    def run(self, prepared, settings, run_at):
+    def run(self, prepared, settings, run_at, *, guard=None):
+        """模擬 BookingRunner.run：job 一開始檢查 guard，等待期間每件事發生後再檢查。"""
         self.calls.append(("run", run_at))
         self.ran_with.append(prepared)
+        for event in [None, *self.while_waiting]:
+            if event is not None:
+                event()
+            reason = guard() if guard is not None else None
+            self.guard_results.append(reason)
+            if reason:
+                raise RunCancelled(reason)
         if self.run_error:
             raise self.run_error
         return self.run_result
@@ -394,3 +404,124 @@ def test_give_up_during_catch_up_is_marked_late(env):
     drive(make(runner), clock, [t(13, 30), t(13, 31), t(13, 31, 1)])
     (record,) = store.load_runs()
     assert record.late is True and record.results == ()
+
+
+# --- 寫入前可取消（偷跑防護）---
+
+def settings_with(**changes):
+    values = dict(name="Zoe", spreadsheet_url=SETTINGS.spreadsheet_url)
+    values.update(changes)
+    return Settings(**values)
+
+
+@pytest.mark.parametrize("change, reason", [
+    (lambda store: store.save_settings(settings_with(run_time=time(14, 0)), now=t(12, 59, 30)),
+     "自動預約時間已變更，取消本次寫入"),
+    (lambda store: store.save_settings(settings_with(run_weekday=3), now=t(12, 59, 30)),
+     "自動預約時間已變更，取消本次寫入"),
+    (lambda store: store.save_settings(settings_with(spreadsheet_url=NEW_URL), now=t(12, 59, 30)),
+     "預約表網址已變更，取消本次寫入"),
+    (lambda store: store.save_settings(settings_with(name=""), now=t(12, 59, 30)),
+     "設定無效，取消本次寫入"),
+], ids=["run_time", "weekday", "spreadsheet", "invalid"])
+def test_settings_changed_while_waiting_cancels_the_write(env, change, reason):
+    store, clock, notes, make = env
+    runner = FakeRunner(while_waiting=[lambda: None, lambda: change(store)])
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 59)])
+    assert runner.guard_results == [None, None, reason]  # 改變之後的下一次檢查就取消
+    (record,) = store.load_runs()
+    assert (record.error, record.results, record.requests) == (reason, (), (REQ,))
+    assert notes.items == [("自動預約已取消", f"{reason}（本週不會再自動執行）")]
+    assert service.state.finished
+
+
+def test_cancelled_week_is_not_run_again_at_the_new_time(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(while_waiting=[
+        lambda: store.save_settings(settings_with(run_time=time(14, 0)), now=t(12, 59, 30))])
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 59), t(13, 0), t(13, 50), t(13, 59), t(14, 0, 30)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run"]  # 14:00 不再為同一週預檢或寫入
+    assert store.executed_weeks() == {MON}
+    assert len(store.load_runs()) == 1
+
+
+def test_unrelated_settings_change_while_waiting_does_not_cancel(env):
+    store, clock, notes, make = env
+    runner = FakeRunner(while_waiting=[lambda: store.save_settings(settings_with(theme="dark"), now=t(12, 59, 30))])
+    drive(make(runner), clock, [t(12, 50), t(12, 59)])
+    assert runner.guard_results == [None, None]
+    assert store.load_runs()[0].results == OK and notes.items == [("自動預約完成", "1 成功")]
+
+
+def test_cancel_current_while_waiting_cancels_the_write(env):
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    runner.while_waiting = [service.cancel_current]
+    drive(service, clock, [t(12, 50), t(12, 59), t(13, 0)])
+    assert runner.guard_results == [None, "已手動取消"]
+    (record,) = store.load_runs()
+    assert record.error == "已手動取消" and record.results == ()
+    assert notes.items == [("自動預約已取消", "已手動取消（本週不會再自動執行）")]
+    assert [c[0] for c in runner.calls] == ["prepare", "run"]
+
+
+def test_cancel_current_while_plan_is_ready_closes_edge_and_skips_the_week(env):
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    service.cancel_current()
+    drive(service, clock, [t(12, 55), t(12, 59), t(13, 0, 30)])
+    assert [c[0] for c in runner.calls] == ["prepare", "abandon"]  # 不寫入
+    (record,) = store.load_runs()
+    assert record.error == "已手動取消" and record.results == () and record.target_monday == MON
+    assert notes.items == [("自動預約已取消", "已手動取消（本週不會再自動執行）")]
+
+
+def test_cancel_current_before_preflight_window_does_nothing(env):
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 0)])
+    service.cancel_current()  # 還沒到 T−10：沒有進行中的自動預約可以取消
+    drive(service, clock, [t(12, 1), t(12, 50), t(12, 59)])
+    assert [c[0] for c in runner.calls] == ["prepare", "run"]
+    assert store.load_runs()[0].results == OK
+
+
+def test_guard_on_browser_thread_does_not_need_the_service_lock(env):
+    # 實際的 guard 在瀏覽器執行緒被呼叫，而服務執行緒此時持有 _lock 並等待寫入結束
+    store, clock, notes, make = env
+    results = []
+
+    class OtherThreadRunner(FakeRunner):
+        def run(self, prepared, settings, run_at, *, guard=None):
+            th = threading.Thread(target=lambda: results.append(guard()))
+            th.start()
+            th.join(timeout=2)
+            assert not th.is_alive(), "guard 等待 _lock：死結"
+            return OK
+    runner = OtherThreadRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 59)])
+    assert results == [None]
+
+
+def test_cancel_current_does_not_block_while_step_holds_the_lock(env):
+    store, clock, notes, make = env
+    done = threading.Event()
+
+    class BlockingRunner(FakeRunner):
+        def run(self, prepared, settings, run_at, *, guard=None):
+            th = threading.Thread(target=lambda: (service.cancel_current(), done.set()))
+            th.start()
+            th.join(timeout=2)
+            return super().run(prepared, settings, run_at, guard=guard)
+    runner = BlockingRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50), t(12, 59)])
+    assert done.is_set()
+    assert store.load_runs()[0].error == "已手動取消"

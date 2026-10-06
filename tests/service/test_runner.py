@@ -7,7 +7,7 @@ from instrument_booking.core.models import TAIPEI, BookingRequest, CellState, In
 from instrument_booking.browser.downloader import DownloadError
 from instrument_booking.browser.sheets_writer import BrowserSheetWriter
 from instrument_booking.service.occupancy import OccupancyService
-from instrument_booking.service.runner import BookingRunner, RunnerError
+from instrument_booking.service.runner import BookingRunner, RunCancelled, RunnerError
 from instrument_booking.service.worker import BrowserWorker
 from instrument_booking.service.settings import Settings
 from instrument_booking.storage.json_store import JsonStore
@@ -124,3 +124,57 @@ def test_other_browser_work_after_prepare_keeps_standby_edge_open(tmp_path):
         assert [e for e, _ in log] == ["start", "close"]
     finally:
         worker.shutdown()
+
+
+# --- 寫入前可取消（偷跑防護）---
+
+class Guard:
+    """記錄每次被呼叫時的（本機）時間；cancel_after 之後回傳取消原因。"""
+
+    def __init__(self, clock, cancel_after=None, reason="自動預約時間已變更，取消本次寫入", page=None):
+        self.clock, self.cancel_after, self.reason, self.page = clock, cancel_after, reason, page
+        self.calls = []
+        self.pasted_before = []  # 每次被呼叫時已貼上的筆數
+
+    def __call__(self):
+        self.calls.append(self.clock.t)
+        if self.page is not None:
+            self.pasted_before.append(len(self.page.pasted))
+        if self.cancel_after is not None and self.clock.t >= self.cancel_after:
+            return self.reason
+        return None
+
+
+def test_guard_cancelling_at_job_start_writes_nothing(tmp_path):
+    runner, worker, page, clock = make(tmp_path)
+    prepared = runner.prepare(SETTINGS, [REQ])
+    guard = Guard(clock, cancel_after=0, reason="已手動取消")
+    with pytest.raises(RunCancelled, match="已手動取消") as info:
+        runner.run(prepared, SETTINGS, RUN_AT, guard=guard)
+    assert isinstance(info.value, RunnerError)
+    assert guard.calls == [1000.0]  # job 一開始就檢查
+    assert page.pasted == [] and page.log == []  # 沒有建立寫入器、沒有任何操作
+    assert worker.holds == [True, False]  # 取消後照常關閉 Edge
+
+
+def test_guard_cancelling_while_waiting_for_opening_time_writes_nothing(tmp_path):
+    runner, worker, page, clock = make(tmp_path)
+    prepared = runner.prepare(SETTINGS, [REQ])
+    guard = Guard(clock, cancel_after=1300.0)  # 等待到一半時設定被改變
+    with pytest.raises(RunCancelled, match="自動預約時間已變更"):
+        runner.run(prepared, SETTINGS, RUN_AT, guard=guard)
+    assert page.pasted == []
+    assert ("202610", "B10") not in page.cells
+    assert 1300.0 <= clock.t < 1301.0  # 在下一個刻度就停止等待
+
+
+def test_guard_is_checked_every_tick_until_opening_time_but_never_after(tmp_path):
+    runner, worker, page, clock = make(tmp_path)
+    prepared = runner.prepare(SETTINGS, [REQ])
+    guard = Guard(clock, page=page)
+    (result,) = runner.run(prepared, SETTINGS, RUN_AT, guard=guard)
+    assert result.status is ItemStatus.SUCCESS
+    assert guard.calls[0] == 1000.0
+    assert len(guard.calls) > 600 / 0.05  # 等待期間每個刻度都檢查
+    assert len(page.pasted) == 1 and set(guard.pasted_before) == {0}  # 開放時間到了之後（寫入、驗證等待）不再檢查
+    assert clock.t > 1000.0 + 600 + 4.9  # 有經過寫入後的 5 秒驗證等待
