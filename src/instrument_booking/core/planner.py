@@ -6,7 +6,15 @@ from datetime import datetime, time
 from typing import Sequence
 
 from instrument_booking.core.legend import resolve_color
-from instrument_booking.core.models import BookingRequest, CellFont, CellState, ItemResult, ItemStatus
+from instrument_booking.core.models import (
+    TAIPEI,
+    BookingRequest,
+    CellFont,
+    CellState,
+    ItemResult,
+    ItemStatus,
+    to_taipei,
+)
 from instrument_booking.core.occupancy import cell_font, cell_state, is_empty
 from instrument_booking.core.sheet_locator import LocateError, SheetIndex, Target
 
@@ -38,10 +46,12 @@ def describe_busy(target: Target, cells: Sequence[CellState]) -> str | None:
 
 
 def make_plan(wb, index: SheetIndex, requests: Sequence[BookingRequest], now: datetime) -> Plan:
+    """now 必須帶時區（換算為台北時間比較；時段一律是台北時間）。"""
+    now = to_taipei(now)
     writes: list[PlannedWrite] = []
     skipped: list[ItemResult] = []
     for req in requests:
-        start = datetime.combine(req.date, time(req.start_hour), tzinfo=now.tzinfo)
+        start = datetime.combine(req.date, time(req.start_hour), tzinfo=TAIPEI)
         if start <= now:
             skipped.append(ItemResult(req.id, ItemStatus.FAILED, reason="時段已開始或已過去"))
             continue

@@ -1,4 +1,4 @@
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 
@@ -61,3 +61,56 @@ def test_due_run_before_this_weeks_run_returns_previous_cycle():
 def test_due_run_sunday_late_night_targets_next_day_week():
     d = due_run(datetime(2026, 10, 19, 0, 30, tzinfo=TAIPEI), 6, time(23, 0), set())
     assert (d.target_monday, d.late) == (date(2026, 10, 19), True)
+
+
+JST = timezone(timedelta(hours=9))
+
+
+@pytest.mark.parametrize("fn", [next_run, previous_run])
+def test_naive_now_is_rejected(fn):
+    with pytest.raises(ValueError):
+        fn(datetime(2026, 10, 9, 12), FRI, AT)
+
+
+def test_due_run_rejects_naive_now():
+    with pytest.raises(ValueError):
+        due_run(datetime(2026, 10, 9, 13, 20), FRI, AT, set())
+
+
+def test_target_week_rejects_naive_run_at():
+    with pytest.raises(ValueError):
+        target_week(datetime(2026, 10, 9, 13))
+
+
+def test_next_run_converts_other_timezone_to_taipei():
+    # UTC+9 的 10:00＝台北 09:00 → 當天台北 13:00
+    r = next_run(datetime(2026, 10, 9, 10, 0, tzinfo=JST), FRI, AT)
+    assert r == t(9, 13)
+    assert r.utcoffset() == timedelta(hours=8)
+
+
+def test_next_run_other_timezone_after_local_1300_but_before_taipei_1300():
+    # UTC+9 的 13:30＝台北 12:30 → 仍是當天台北 13:00，不是下週
+    assert next_run(datetime(2026, 10, 9, 13, 30, tzinfo=JST), FRI, AT) == t(9, 13)
+
+
+def test_previous_run_converts_other_timezone_to_taipei():
+    # UTC 的 05:30＝台北 13:30 → 剛過的台北 13:00
+    assert previous_run(datetime(2026, 10, 9, 5, 30, tzinfo=timezone.utc), FRI, AT) == t(9, 13)
+
+
+def test_due_run_converts_other_timezone_to_taipei():
+    # UTC 的週日 16:30＝台北週一 00:30；週日 23:00（台北）的執行已到點，目標週為 10/19
+    d = due_run(datetime(2026, 10, 18, 16, 30, tzinfo=timezone.utc), 6, time(23, 0), set())
+    assert (d.run_at, d.target_monday) == (datetime(2026, 10, 18, 23, 0, tzinfo=TAIPEI), date(2026, 10, 19))
+
+
+def test_target_week_uses_taipei_date():
+    # UTC 的週日 23:30＝台北週一 07:30 → 目標週是再下一週
+    assert target_week(datetime(2026, 10, 11, 23, 30, tzinfo=timezone.utc)) == date(2026, 10, 19)
+
+
+def test_fire_at_rejects_naive_run_at():
+    # naive 會被當成本機時區；本機若不是台北時間可能提早觸發
+    with pytest.raises(ValueError):
+        fire_at(datetime(2026, 10, 9, 13), ClockSync(ClockSource.NTP, 0))

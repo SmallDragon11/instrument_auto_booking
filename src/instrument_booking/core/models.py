@@ -12,6 +12,13 @@ TAIPEI = timezone(timedelta(hours=8), "Asia/Taipei")
 _HEX6 = re.compile(r"^[0-9A-F]{6}$")
 
 
+def to_taipei(dt: datetime) -> datetime:
+    """轉為台北時間（實驗室的時刻一律以台北時間定義）。不帶時區的 datetime 無法判斷，拋 ValueError。"""
+    if dt.tzinfo is None or dt.utcoffset() is None:
+        raise ValueError(f"時間必須帶時區（例如 tzinfo=TAIPEI）：{dt!r}")
+    return dt.astimezone(TAIPEI)
+
+
 class Instrument(Enum):
     TUBE_A = ("tube", 0, "A-牆")
     TUBE_B = ("tube", 1, "B-窗")

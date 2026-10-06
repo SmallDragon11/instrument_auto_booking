@@ -1,4 +1,4 @@
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
@@ -93,3 +93,16 @@ def test_fonts_are_read_per_cell_from_snapshot(wb):
     ws["B10"].alignment = Alignment(horizontal="center")
     (w,) = plan_for(wb, tube("t1", 13, 15)).writes  # B10:B11
     assert w.fonts == (CellFont(12.0, True, "center"), CellFont(11.0, False, None))
+
+
+def test_naive_now_is_rejected(wb):
+    with pytest.raises(ValueError):
+        plan_for(wb, tube("t1", 13, 17), now=datetime(2026, 10, 9, 12, 50))
+
+
+def test_now_in_other_timezone_is_compared_in_taipei(wb):
+    # UTC+9 的 10/12 13:30＝台北 12:30：13 點的時段尚未開始，12 點的已開始
+    now = datetime(2026, 10, 12, 13, 30, tzinfo=timezone(timedelta(hours=9)))
+    p = plan_for(wb, tube("past", 12, 13), tube("future", 13, 14), now=now)
+    assert [w.request.id for w in p.writes] == ["future"]
+    assert [r.request_id for r in p.skipped] == ["past"]
