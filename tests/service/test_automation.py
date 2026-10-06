@@ -35,7 +35,8 @@ class FakeRunner:
         self.calls.append(("prepare", tuple(requests)))
         if self.prepare_errors:
             raise self.prepare_errors.pop(0)
-        return Prepared(Plan((), (), ()), ClockSync(ClockSource.NTP, 0.0), Clock(ClockSync(ClockSource.NTP, 0.0)), t(12, 50))
+        return Prepared(Plan((), (), ()), ClockSync(ClockSource.NTP, 0.0), Clock(ClockSync(ClockSource.NTP, 0.0)), t(12, 50),
+                        "FILEID")
 
     def run(self, prepared, settings, run_at):
         self.calls.append(("run", run_at))

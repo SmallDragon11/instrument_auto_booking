@@ -20,6 +20,10 @@ SNAPSHOT_KEEP = 5
 
 def describe_error(e: BaseException) -> str:
     """把例外轉成給使用者看的繁體中文說明。"""
+    from instrument_booking.service.runner import RunnerError  # 在函式內匯入：runner 依賴本模組
+
+    if isinstance(e, RunnerError):
+        return str(e)
     if isinstance(e, NotLoggedIn):
         return "需要重新登入 Google：請到「設定」頁按「重新登入」"
     if isinstance(e, (SessionError, DownloadError, StoreError, WriterError, WriterCrashed)):

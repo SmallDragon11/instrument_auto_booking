@@ -87,3 +87,33 @@ def test_close_session_runs_after_queued_jobs(setup):
     worker.submit(lambda s: None, keep_open=True)
     worker.close_session().result()
     assert [e for e, _ in log] == ["start", "close"]
+
+
+def test_hold_keeps_session_open_after_closing_jobs_until_released(setup):
+    worker, log, sessions = setup
+    worker.submit(lambda s: None, keep_open=True, hold=True).result()  # 預檢：保留待命的 Edge
+    worker.submit(lambda s: None).result()                              # 例如佔用重新整理、連線測試
+    assert [e for e, _ in log] == ["start"]  # 保留中：一般工作結束後不關閉
+    worker.submit(lambda s: None, hold=False).result()                  # 寫入：解除保留，結束後關閉
+    assert [e for e, _ in log] == ["start", "close"]
+    assert len(sessions) == 1
+
+
+def test_failed_job_while_held_does_not_close(setup):
+    worker, log, _ = setup
+    worker.submit(lambda s: None, keep_open=True, hold=True).result()
+
+    def boom(s):
+        raise RuntimeError("下載失敗")
+    with pytest.raises(RuntimeError):
+        worker.submit(boom).result()
+    assert [e for e, _ in log] == ["start"]
+
+
+def test_close_session_closes_and_releases_hold(setup):
+    worker, log, _ = setup
+    worker.submit(lambda s: None, keep_open=True, hold=True).result()
+    worker.close_session().result()  # 使用者明確要求（例如重新登入）一律關閉
+    assert [e for e, _ in log] == ["start", "close"]
+    worker.submit(lambda s: None).result()
+    assert [e for e, _ in log] == ["start", "close", "start", "close"]  # 已解除保留

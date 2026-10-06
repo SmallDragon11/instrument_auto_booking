@@ -8,6 +8,7 @@ from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from instrument_booking.browser.downloader import DownloadError
 from instrument_booking.browser.session import NotLoggedIn, SessionError
+from instrument_booking.service.runner import RunnerError
 from instrument_booking.service.housekeeping import (
     LOGGER_NAME,
     describe_error,
@@ -27,6 +28,11 @@ from instrument_booking.service.housekeeping import (
 ])
 def test_describe_error(error, expected):
     assert expected in describe_error(error)
+
+
+def test_describe_runner_error_shows_message_as_is():
+    msg = "預約表網址在預檢之後被改變，為安全起見不寫入"
+    assert describe_error(RunnerError(msg)) == msg
 
 
 @pytest.fixture
