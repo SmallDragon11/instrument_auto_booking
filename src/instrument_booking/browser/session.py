@@ -45,8 +45,17 @@ class EdgeSession:
         self._page = None
 
     def start(self):
-        """啟動並開啟試算表，回傳 Playwright Page；未登入時拋 NotLoggedIn。"""
+        """啟動並開啟試算表，回傳 Playwright Page；未登入時拋 NotLoggedIn。任何失敗都會先關閉已啟動的資源。"""
         self._playwright = self._playwright_factory().start()
+        try:
+            page = self._open()
+        except BaseException:
+            self.close()
+            raise
+        self._page = page
+        return page
+
+    def _open(self):
         self._context = self._playwright.chromium.launch_persistent_context(
             str(self.profile_dir),
             channel="msedge",
@@ -62,10 +71,8 @@ class EdgeSession:
             page.wait_for_selector(NAME_BOX, timeout=self._load_timeout_ms)
         except PlaywrightTimeoutError:
             if GOOGLE_LOGIN_HOST in page.url:
-                self.close()
                 raise NotLoggedIn("需要重新登入 Google") from None
             raise
-        self._page = page
         return page
 
     def restart(self):

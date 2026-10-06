@@ -39,8 +39,11 @@ class FakeChromium:
     def __init__(self, context):
         self.context = context
         self.launch_args = None
+        self.fail = None
 
     def launch_persistent_context(self, user_data_dir, **kwargs):
+        if self.fail:
+            raise self.fail
         self.launch_args = (user_data_dir, kwargs)
         return self.context
 
@@ -83,10 +86,11 @@ def test_login_redirect_raises_not_logged_in_and_closes():
     assert context.closed and pw.stopped
 
 
-def test_other_load_timeout_propagates():
-    session, _, _ = make(FakePage(URL, loads=False))
+def test_other_load_timeout_propagates_and_releases_browser():
+    session, pw, context = make(FakePage(URL, loads=False))
     with pytest.raises(PlaywrightTimeoutError):
         session.start()
+    assert context.closed and pw.stopped
 
 
 def test_restart_closes_then_starts_again():
@@ -105,3 +109,11 @@ def test_open_login_window_uses_plain_edge_with_profile(tmp_path):
     assert f"--user-data-dir={tmp_path / 'profile'}" in args
     assert args[-1] == URL
     assert (tmp_path / "profile").is_dir()
+
+
+def test_launch_failure_stops_playwright():
+    session, pw, _ = make(FakePage(URL))
+    pw.chromium.fail = RuntimeError("設定檔被另一個 Edge 占用")
+    with pytest.raises(RuntimeError):
+        session.start()
+    assert pw.stopped
