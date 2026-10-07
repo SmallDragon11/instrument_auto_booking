@@ -19,6 +19,7 @@ class BackgroundTasks(QObject):
 
     def __init__(self, parent: QObject | None = None, max_workers: int = 2) -> None:
         super().__init__(parent)
+        self._closed = False
         self._pool = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="gui-task")
         self._deliver.connect(self._call)
 
@@ -29,16 +30,23 @@ class BackgroundTasks(QObject):
                 result = fn()
             except Exception as e:
                 log.warning("背景工作失敗：%s", e)
-                if on_error is not None:
-                    self._deliver.emit(on_error, e)
+                if on_error is not None and not self._closed:
+                    try:
+                        self._deliver.emit(on_error, e)
+                    except RuntimeError:
+                        log.warning("背景工作回呼失敗（QObject 已拆卸）")
                 return None
-            if on_done is not None:
-                self._deliver.emit(on_done, result)
+            if on_done is not None and not self._closed:
+                try:
+                    self._deliver.emit(on_done, result)
+                except RuntimeError:
+                    log.warning("背景工作回呼失敗（QObject 已拆卸）")
             return result
         return self._pool.submit(job)
 
     def shutdown(self) -> None:
         """不等待進行中的工作（例如下載中）；結束程式時呼叫。"""
+        self._closed = True
         self._pool.shutdown(wait=False, cancel_futures=True)
 
     @staticmethod

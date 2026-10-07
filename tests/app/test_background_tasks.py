@@ -36,3 +36,28 @@ def test_notifier_signal_crosses_threads(qtbot):
     t.join()
     qtbot.waitUntil(lambda: len(got) > 0)
     assert got == [("標題", "內容", threading.get_ident())]
+
+
+def test_no_delivery_after_shutdown(qtbot):
+    """關閉後，進行中的工作不應回呼 GUI（避免在拆卸的 widget 上 emit）。"""
+    tasks = BackgroundTasks()
+    results = []
+    gate = threading.Event()
+
+    # 提交工作：等待 gate，完成時回呼 results.append
+    future = tasks.run(lambda: gate.wait(5) or "done", results.append)
+
+    # 立即關閉，工作仍在執行
+    tasks.shutdown()
+
+    # 放開 gate 讓工作完成
+    gate.set()
+
+    # 確保工作確實完成（等待 future）
+    future.result(timeout=5)
+
+    # 等待一點時間讓 signal 有機會排入隊列（如果有的話）
+    qtbot.wait(200)
+
+    # 驗證：即使工作完成，也不應呼叫回呼（因為已關閉）
+    assert results == []
