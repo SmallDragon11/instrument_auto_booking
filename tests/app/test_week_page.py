@@ -47,6 +47,16 @@ def make_page(qtbot, store, occupancy=None, cancels=None, confirm=lambda *a: Tru
     return page, occupancy
 
 
+def real_status(monday=MON, **kw):
+    return ServiceStatus(ServicePhase.IDLE, run_at=RUN, target_monday=monday, **kw)
+
+
+def open_week(page, monday=MON):
+    """切換週並套用一個「真實、未鎖定」的服務狀態（自動下載佔用由 apply_status 觸發）。"""
+    page.set_week(monday)
+    page.apply_status(real_status(monday), RUN - timedelta(days=1))
+
+
 def wait_refreshed(qtbot, page):
     qtbot.waitUntil(lambda: page._refreshing_for is None)
 
@@ -59,7 +69,7 @@ def test_set_week_loads_saved_list_and_refreshes_occupancy(qtbot, store):
     saved = BookingRequest("a", Instrument.TUBE_B, MON, 9, 12, "Ar", "A4C2F4")
     store.save_bookings(MON, [saved])
     page, occupancy = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     assert page.week_label.text() == "目標週：10/12（一）– 10/18（日）"
     assert listed(page) == ["1. 10/12（一）B-窗 09:00–12:00 Ar"]
@@ -69,7 +79,7 @@ def test_set_week_loads_saved_list_and_refreshes_occupancy(qtbot, store):
 
 def test_drag_on_tube_tab_adds_request_with_selected_gas(qtbot, store):
     page, _ = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page.gas_combo.setCurrentText("Ar/H2")
     page.calendar.rangeSelected.emit(1, 9, 12)
@@ -82,7 +92,7 @@ def test_drag_on_tube_tab_adds_request_with_selected_gas(qtbot, store):
 def test_oven_tab_uses_fixed_color_and_hides_gas(qtbot, store):
     page, _ = make_page(qtbot, store)
     page.show()
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page._set_instrument(Instrument.OVEN_A)
     assert not page.gas_combo.isVisible()
@@ -94,7 +104,7 @@ def test_oven_tab_uses_fixed_color_and_hides_gas(qtbot, store):
 def test_tube_without_legend_warns_and_adds_nothing(qtbot, tmp_path):
     store = JsonStore(tmp_path)
     page, _ = make_page(qtbot, store, occupancy=FakeOccupancy(error=OSError("離線")))
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     assert "無法更新佔用" in page.occupancy_label.text()
     page.calendar.rangeSelected.emit(0, 9, 10)
@@ -105,7 +115,7 @@ def test_occupied_slots_shown_for_current_instrument_only(qtbot, store):
     view = WeekView(MON, frozenset({(Instrument.TUBE_A, MON, 10), (Instrument.OVEN_A, MON, 9)}),
                     frozenset({("oven", MON + timedelta(days=6))}), LEGEND)
     page, _ = make_page(qtbot, store, occupancy=FakeOccupancy(view))
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     assert page.calendar._occupied == {(0, 10)} and page.calendar._unavailable == set()
     page._set_instrument(Instrument.OVEN_A)
@@ -114,7 +124,7 @@ def test_occupied_slots_shown_for_current_instrument_only(qtbot, store):
 
 def test_block_menu_actions_change_gas_and_delete(qtbot, store):
     page, _ = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page.calendar.rangeSelected.emit(0, 9, 10)
     (r,) = store.load_bookings(MON)
@@ -127,7 +137,7 @@ def test_block_menu_actions_change_gas_and_delete(qtbot, store):
 
 def test_dragging_priority_list_reorders_and_saves(qtbot, store):
     page, _ = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page.calendar.rangeSelected.emit(0, 9, 10)
     page.calendar.rangeSelected.emit(1, 9, 10)
@@ -143,7 +153,7 @@ def test_copy_previous_week_adds_shifted_requests(qtbot, store):
     store.save_bookings(MON - timedelta(days=7), [BookingRequest("old", Instrument.TUBE_C, date(2026, 10, 7), 13, 15,
                                                                  "Ar", "A4C2F4")])
     page, _ = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page._copy_previous_week()
     (r,) = store.load_bookings(MON)
@@ -154,7 +164,7 @@ def test_lock_disables_editing_and_offers_cancel_before_run(qtbot, store):
     cancels = []
     page, _ = make_page(qtbot, store, cancels=cancels)
     page.show()
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     locked = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON, editing_locked=True)
     page.apply_status(locked, RUN - timedelta(minutes=1))
@@ -187,8 +197,8 @@ def test_stale_refresh_result_is_ignored_after_week_change(qtbot, store):
         done.append(monday)
         return WeekView(monday, frozenset(), frozenset(), {"N2": "FF0000"} if monday == MON else LEGEND)
     page, _ = make_page(qtbot, store, occupancy=occupancy)
-    page.set_week(MON)
-    page.set_week(nxt)  # 前一週的下載尚未完成
+    open_week(page)
+    open_week(page, nxt)  # 前一週的下載尚未完成
     gates[nxt].set()
     qtbot.waitUntil(lambda: page._view is not None)
     gates[MON].set()  # 舊的結果最後才到
@@ -200,7 +210,7 @@ def test_stale_refresh_result_is_ignored_after_week_change(qtbot, store):
 
 def test_commit_is_refused_while_locked(qtbot, store):
     page, _ = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page.calendar.rangeSelected.emit(0, 9, 10)
     (r,) = store.load_bookings(MON)
@@ -217,7 +227,7 @@ def test_load_failure_blocks_saving(qtbot, tmp_path):
     (tmp_path / "bookings").mkdir(parents=True, exist_ok=True)
     (tmp_path / "bookings" / "2026-10-12.json").write_text("{壞掉", encoding="utf-8")
     page, _ = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     page.calendar.rangeSelected.emit(0, 9, 10)
     assert (tmp_path / "bookings" / "2026-10-12.json").read_text(encoding="utf-8") == "{壞掉"
@@ -225,7 +235,7 @@ def test_load_failure_blocks_saving(qtbot, tmp_path):
 
 def test_unlock_triggers_refresh(qtbot, store):
     page, occupancy = make_page(qtbot, store)
-    page.set_week(MON)
+    open_week(page)
     wait_refreshed(qtbot, page)
     locked = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON, editing_locked=True)
     page.apply_status(locked, RUN - timedelta(minutes=1))
@@ -233,3 +243,39 @@ def test_unlock_triggers_refresh(qtbot, store):
     page.apply_status(unlocked, RUN + timedelta(minutes=1))
     wait_refreshed(qtbot, page)
     assert occupancy.calls == [MON, MON]
+
+
+def test_set_week_alone_does_not_download(qtbot, store):
+    page, occupancy = make_page(qtbot, store)
+    page.set_week(MON)
+    qtbot.wait(50)
+    assert occupancy.calls == []
+
+
+def test_locked_status_prevents_automatic_download(qtbot, store):
+    page, occupancy = make_page(qtbot, store)
+    page.set_week(MON)
+    page.apply_status(real_status(editing_locked=True), RUN - timedelta(minutes=5))
+    qtbot.wait(50)
+    assert occupancy.calls == []
+
+
+def test_initial_status_without_run_at_does_not_download_until_real_status(qtbot, store):
+    page, occupancy = make_page(qtbot, store)
+    page.set_week(MON)
+    page.apply_status(ServiceStatus(ServicePhase.IDLE), RUN - timedelta(days=1))  # App 剛啟動，服務尚未跑第一次 step
+    qtbot.wait(50)
+    assert occupancy.calls == []
+    page.apply_status(real_status(), RUN - timedelta(days=1))
+    wait_refreshed(qtbot, page)
+    page.apply_status(real_status(), RUN - timedelta(days=1) + timedelta(seconds=1))
+    qtbot.wait(50)
+    assert occupancy.calls == [MON]  # 只下載一次
+
+
+def test_not_configured_status_counts_as_real(qtbot, store):
+    page, occupancy = make_page(qtbot, store)
+    page.set_week(MON)
+    page.apply_status(ServiceStatus(ServicePhase.NOT_CONFIGURED), RUN - timedelta(days=1))
+    wait_refreshed(qtbot, page)
+    assert occupancy.calls == [MON]

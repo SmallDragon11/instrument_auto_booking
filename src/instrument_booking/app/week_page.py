@@ -41,6 +41,7 @@ class WeekPage(QWidget):
         self._refreshing_for: date | None = None
         self._instrument = Instrument.TUBE_A
         self._locked = False
+        self._pending_auto_refresh = False  # 切換週後待自動下載佔用（等 apply_status 確認未鎖定才下載）
         self._load_error: str | None = None
         try:
             self._legend = store.load_legend()
@@ -142,7 +143,7 @@ class WeekPage(QWidget):
         return list(self._requests)
 
     def set_week(self, monday: date) -> None:
-        """切換到另一個目標週：讀取該週清單並在背景下載最新的佔用。"""
+        """切換到另一個目標週：讀取該週清單；佔用的自動下載交給 apply_status，確認未鎖定、狀態有效後才進行。"""
         if monday == self._monday:
             return
         self._monday = monday
@@ -157,8 +158,7 @@ class WeekPage(QWidget):
             self._load_error = str(e)
             show_info(self, "error", "無法讀取預約清單", str(e), duration=-1)
         self._refresh_views()
-        if not self._locked:
-            self.refresh()
+        self._pending_auto_refresh = True
 
     def apply_status(self, status: ServiceStatus, now: datetime) -> None:
         """每秒由主視窗呼叫：狀態文字、編輯鎖定、取消按鈕。"""
@@ -174,7 +174,13 @@ class WeekPage(QWidget):
                       self.gas_combo):
                 w.setEnabled(not locked)
             if not locked:
+                self._pending_auto_refresh = False
                 self.refresh()
+        # 服務尚未跑過第一次 step（沒有 run_at 也不是未設定）時鎖定狀態不可信，先不下載，避免排進鎖定期間
+        if (self._pending_auto_refresh and not locked
+                and (status.run_at is not None or status.phase is ServicePhase.NOT_CONFIGURED)):
+            self._pending_auto_refresh = False
+            self.refresh()
 
     def refresh(self) -> None:
         """在背景重新下載預約表並更新佔用與氣體選項；失敗只顯示提示，不影響編輯。"""
