@@ -1,6 +1,8 @@
 from datetime import date, datetime, timedelta
 
 from instrument_booking.app.texts import (
+    _KIND,
+    STATUS_ICON,
     clock_label,
     countdown,
     result_rows,
@@ -86,3 +88,8 @@ def test_result_rows_follow_priority_and_mark_missing_results():
     assert rows[0].status == "✅ 成功" and rows[0].detail == "寫入於 13:00:00.412"
     assert rows[1].status == "⚡ 即時衝突" and rows[1].detail == "已有人預約：Amy；圖例找不到 Ar"
     assert rows[2].status == "－ 未執行" and rows[2].detail == ""
+
+
+def test_every_item_status_has_icon_and_kind():
+    assert set(STATUS_ICON) == set(ItemStatus)
+    assert set(_KIND) == set(ItemStatus)

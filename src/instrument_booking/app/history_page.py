@@ -55,6 +55,7 @@ class HistoryPage(QWidget):
         self._store = store
         self._tasks = tasks
         self._loading = False
+        self._reload_pending = False  # 讀取進行中又被要求重新整理：結束後再讀一次
         root = QVBoxLayout(self)
         root.setContentsMargins(24, 16, 24, 16)
         header = QHBoxLayout()
@@ -87,6 +88,7 @@ class HistoryPage(QWidget):
     def reload(self) -> None:
         """在背景讀取紀錄（會讀檔，不可在 GUI 執行緒）。"""
         if self._loading:
+            self._reload_pending = True
             return
         self._loading = True
         self.reload_button.setEnabled(False)
@@ -114,6 +116,9 @@ class HistoryPage(QWidget):
     def _done(self) -> None:
         self._loading = False
         self.reload_button.setEnabled(True)
+        if self._reload_pending:
+            self._reload_pending = False
+            self.reload()
 
     def _notice(self, text: str) -> None:
         self.notice_label.setText(text)

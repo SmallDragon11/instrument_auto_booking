@@ -1,3 +1,4 @@
+import threading
 from datetime import date, datetime
 
 from instrument_booking.app.history_page import HistoryPage
@@ -57,3 +58,26 @@ def test_reload_replaces_cards(qtbot, tmp_path):
     page.reload()
     qtbot.waitUntil(lambda: not page._loading)
     qtbot.waitUntil(lambda: len(page.cards()) == 2)
+
+
+def test_reload_during_load_is_not_dropped(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    gate = threading.Event()
+    calls = []
+    real_load = store.load_runs
+
+    def slow_load():
+        calls.append(1)
+        if len(calls) == 1:
+            gate.wait(5)  # 第一次讀取進行中
+        return real_load()
+
+    store.load_runs = slow_load
+    page = make(qtbot, store)
+    page.reload()
+    qtbot.waitUntil(lambda: len(calls) == 1)
+    store.append_run(run(datetime(2026, 10, 9, 13, 0, tzinfo=TAIPEI)))  # 讀取期間新增的紀錄
+    page.reload()  # 讀取進行中又要求重新整理：不可被丟掉
+    gate.set()
+    qtbot.waitUntil(lambda: len(calls) == 2 and not page._loading)
+    qtbot.waitUntil(lambda: len(page.cards()) == 1)
