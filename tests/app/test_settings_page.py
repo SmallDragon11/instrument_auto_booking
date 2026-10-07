@@ -108,3 +108,35 @@ def test_login_runs_in_background_and_failure_reenables_button(qtbot, tmp_path):
     page.start_login()
     assert not page.login_button.isEnabled()
     qtbot.waitUntil(lambda: page.login_button.isEnabled())
+
+
+def test_unsaved_changes_block_connection_test_and_login(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL))
+    login_calls = []
+    connection_calls = []
+
+    def login():
+        login_calls.append("login")
+
+    def connection_test():
+        connection_calls.append("test")
+        return ConnectionReport(True, "連線正常", "NTP", 0.6)
+
+    page, _ = make(qtbot, store, login=login)
+    page._connection_test = connection_test
+    # 編輯 URL（未儲存）
+    page.url_edit.setText("https://docs.google.com/spreadsheets/d/OTHER/edit")
+    # 嘗試連線測試和登入
+    page.run_connection_test()
+    page.start_login()
+    qtbot.wait(50)
+    # 應該都沒有被呼叫
+    assert login_calls == [] and connection_calls == []
+    assert page.account_label.text() == "尚未測試連線"
+    # 儲存設定後可以執行
+    page.url_edit.setText(URL)
+    page.save()
+    page.run_connection_test()
+    qtbot.waitUntil(lambda: len(connection_calls) > 0, timeout=1000)
+    assert len(connection_calls) == 1

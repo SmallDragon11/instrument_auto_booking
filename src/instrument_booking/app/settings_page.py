@@ -192,9 +192,20 @@ class SettingsPage(QWidget):
         self.login_button.setEnabled(enabled)
         self.test_button.setEnabled(enabled)
 
+    def _has_unsaved_changes(self) -> bool:
+        """檢查設定是否有未儲存的變更。"""
+        try:
+            saved = self._store.load_settings()
+        except StoreError:
+            return True
+        return self.current() != saved
+
     # --- Google 帳號 ---
     def start_login(self) -> None:
         if self._locked or self._busy:
+            return
+        if self._has_unsaved_changes():
+            show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存設定」再測試連線或重新登入。")
             return
         self._set_busy(True)
         self._tasks.run(self._start_login, self._login_started, self._login_failed)
@@ -209,6 +220,9 @@ class SettingsPage(QWidget):
 
     def run_connection_test(self) -> None:
         if self._locked or self._busy:
+            return
+        if self._has_unsaved_changes():
+            show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存設定」再測試連線或重新登入。")
             return
         self._set_busy(True)
         self.account_label.setText("測試中：校時、開啟試算表、下載預約表…")
