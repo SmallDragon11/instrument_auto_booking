@@ -36,7 +36,7 @@ class WeekCalendar(QWidget):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
-        self.setMinimumSize(56 + DAYS * 72, 44 + (LAST_HOUR - FIRST_HOUR) * 26)
+        self.setMinimumSize(56 + DAYS * 48, 44 + (LAST_HOUR - FIRST_HOUR) * 26)
         self.setMouseTracking(True)
         self._monday = date.today()
         self._requests: list[BookingRequest] = []

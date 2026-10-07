@@ -319,3 +319,9 @@ def test_corrupt_settings_do_not_touch_autostart(env):
     window = make()
     assert window._settings_error is not None
     assert registry.values == {}
+
+
+def test_window_minimum_width_is_narrow(env):
+    _, _, _, _, make = env
+    window = make()
+    assert window.minimumSizeHint().width() <= 760
