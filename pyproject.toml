@@ -2,10 +2,13 @@
 name = "instrument-booking"
 version = "0.1.0"
 requires-python = ">=3.13"  # 3.13 前 Windows 的 time.monotonic 解析度為 15.6 毫秒，會吃掉 NTP 0.05 秒餘量的大部分
-dependencies = ["openpyxl>=3.1", "playwright>=1.50"]
+dependencies = ["openpyxl>=3.1", "playwright>=1.50", "PySide6>=6.11", "PySide6-Fluent-Widgets>=1.11"]
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "pytest-qt>=4.5"]
+
+[project.gui-scripts]
+instrument-booking = "instrument_booking.app.main:main"
 
 [build-system]
 requires = ["setuptools>=68"]
