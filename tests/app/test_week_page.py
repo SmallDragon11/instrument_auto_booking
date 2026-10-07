@@ -2,6 +2,7 @@ import threading
 from datetime import date, datetime, timedelta
 
 import pytest
+from PySide6.QtWidgets import QAbstractItemView
 
 from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.app.week_page import ID_ROLE, WeekPage
@@ -178,6 +179,28 @@ def test_lock_disables_editing_and_offers_cancel_before_run(qtbot, store):
     assert not page.cancel_button.isVisible()
     page.apply_status(ServiceStatus(ServicePhase.DONE, run_at=RUN, target_monday=MON), RUN + timedelta(minutes=1))
     assert not page.lock_bar.isVisible() and page.calendar.isEnabled()
+
+
+def test_locked_priority_list_stays_scrollable_but_not_draggable(qtbot, store):
+    page, _ = make_page(qtbot, store)
+    open_week(page)
+    wait_refreshed(qtbot, page)
+    assert page.priority_list.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
+    page.calendar.rangeSelected.emit(0, 9, 10)
+    page.calendar.rangeSelected.emit(1, 9, 10)
+    order = [r.id for r in store.load_bookings(MON)]
+    locked = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON, editing_locked=True)
+    page.apply_status(locked, RUN - timedelta(minutes=1))
+    assert page.priority_list.isEnabled()  # 仍可捲動
+    assert page.priority_list.dragDropMode() == QAbstractItemView.DragDropMode.NoDragDrop
+    assert not page.calendar.isEnabled() and not page.delete_button.isEnabled()
+    model = page.priority_list.model()
+    model.moveRow(model.index(0, 0).parent(), 1, model.index(0, 0).parent(), 0)
+    qtbot.wait(50)
+    assert [r.id for r in store.load_bookings(MON)] == order
+    assert [page.priority_list.item(i).data(ID_ROLE) for i in range(2)] == order  # 畫面已還原
+    page.apply_status(ServiceStatus(ServicePhase.DONE, run_at=RUN, target_monday=MON), RUN + timedelta(minutes=1))
+    assert page.priority_list.dragDropMode() == QAbstractItemView.DragDropMode.InternalMove
 
 
 def test_cancel_needs_confirmation(qtbot, store):

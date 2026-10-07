@@ -179,9 +179,12 @@ class WeekPage(QWidget):
         if locked != self._locked:
             self._locked = locked
             self.lock_bar.setVisible(locked)
-            for w in (self.calendar, self.priority_list, self.delete_button, self.copy_button, self.refresh_button,
+            for w in (self.calendar, self.delete_button, self.copy_button, self.refresh_button,
                       self.gas_combo):
                 w.setEnabled(not locked)
+            # 清單本身保持可用才能捲動；鎖定時只關閉拖曳排序
+            self.priority_list.setDragDropMode(QAbstractItemView.DragDropMode.NoDragDrop if locked
+                                               else QAbstractItemView.DragDropMode.InternalMove)
             if not locked:
                 self._pending_auto_refresh = False
                 self.refresh()
