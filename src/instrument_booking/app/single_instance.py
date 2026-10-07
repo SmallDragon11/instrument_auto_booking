@@ -16,7 +16,28 @@ class SingleInstance(QObject):
         self._server: QLocalServer | None = None
 
     def acquire(self) -> bool:
-        """成為唯一的實例回傳 True；已有實例在執行時通知它並回傳 False。"""
+        """成為唯一的實例回傳 True；已有實例在執行時通知它並回傳 False。
+
+        同時啟動多個實例時，探查失敗的實例會再試一次，以便同時發起的實例之間能正確握手。
+        """
+        # 第一次嘗試連接到現有實例
+        if self._notify_existing():
+            return False
+
+        QLocalServer.removeServer(self._key)  # 前一次異常結束留下的名稱
+        self._server = QLocalServer(self)
+        if not self._server.listen(self._key):
+            # 競速時，另一個實例可能剛好搶到名稱；再試一次連接
+            self._server.close()
+            self._server = None
+            if self._notify_existing():
+                return False
+            raise RuntimeError(f"無法建立單一執行個體的通道")
+        self._server.newConnection.connect(self._on_connection)
+        return True
+
+    def _notify_existing(self) -> bool:
+        """嘗試通知現有實例；連接成功則傳送訊號並回傳 True，否則回傳 False。"""
         socket = QLocalSocket()
         socket.connectToServer(self._key)
         if socket.waitForConnected(CONNECT_TIMEOUT_MS):
@@ -24,13 +45,8 @@ class SingleInstance(QObject):
             socket.flush()
             socket.waitForBytesWritten(CONNECT_TIMEOUT_MS)
             socket.disconnectFromServer()
-            return False
-        QLocalServer.removeServer(self._key)  # 前一次異常結束留下的名稱
-        self._server = QLocalServer(self)
-        if not self._server.listen(self._key):
-            raise RuntimeError(f"無法建立單一執行個體的通道：{self._server.errorString()}")
-        self._server.newConnection.connect(self._on_connection)
-        return True
+            return True
+        return False
 
     def release(self) -> None:
         if self._server is not None:
