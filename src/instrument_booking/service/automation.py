@@ -170,6 +170,8 @@ class AutomationService:
             self._publish(now)
 
     def run_forever(self, stop: threading.Event, interval: float = 1.0) -> None:
+        """每 interval 秒跑一次 step，直到 stop；離開迴圈後若有待處理的取消，再跑一次 step 把它記錄下來
+        （否則結束 App 時的取消不會留下紀錄，下次啟動會把使用者取消的預約補寫進去）。"""
         while not stop.wait(interval):
             try:
                 self.step()
@@ -182,6 +184,11 @@ class AutomationService:
                 if self._service_error is not None:
                     self._service_error = None
                     self._status = replace(self._status, service_error=None)
+        if self._cancel.is_set():
+            try:
+                self.step()
+            except Exception:
+                log.exception("結束前處理手動取消時發生錯誤")
 
     def _abandon_after_error(self) -> None:
         """step 出錯：丟棄待命的規劃並關閉 Edge，避免最小化的 Edge 無限期留著；恢復後會重新預檢。"""

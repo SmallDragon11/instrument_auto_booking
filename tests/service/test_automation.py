@@ -844,3 +844,23 @@ def test_service_error_while_closing_edge_is_still_reported(env, monkeypatch):
     assert not thread.is_alive()
     assert notes.items == [("自動預約服務發生錯誤", "網路或檔案錯誤：磁碟錯誤")]
     assert runner.calls[-1] == ("abandon",)
+
+
+def test_cancel_then_stop_still_records_the_cancel(env):
+    """結束 App 時取消：run_forever 離開迴圈前要再跑一次 step，才會記錄取消（否則下次啟動會補寫）。"""
+    store, clock, notes, make = env
+    runner = FakeRunner()
+    service = make(runner)
+    drive(service, clock, [t(12, 50)])
+    clock["now"] = t(12, 55)
+    service.cancel_current()
+    stop = threading.Event()
+    stop.set()
+    service.run_forever(stop, 0.01)
+    (record,) = store.load_runs()
+    assert record.error == "已手動取消" and record.target_monday == MON
+    assert [c[0] for c in runner.calls] == ["prepare", "abandon"]
+    # 本週算已執行：重新啟動後不會補寫
+    restarted = make(FakeRunner())
+    drive(restarted, clock, [t(13, 30)])
+    assert len(store.load_runs()) == 1
