@@ -196,3 +196,40 @@ def test_stale_refresh_result_is_ignored_after_week_change(qtbot, store):
     qtbot.wait(50)
     assert page._view.monday == nxt
     assert [page.gas_combo.itemText(i) for i in range(page.gas_combo.count())] == ["Ar", "Ar/H2"]
+
+
+def test_commit_is_refused_while_locked(qtbot, store):
+    page, _ = make_page(qtbot, store)
+    page.set_week(MON)
+    wait_refreshed(qtbot, page)
+    page.calendar.rangeSelected.emit(0, 9, 10)
+    (r,) = store.load_bookings(MON)
+    locked = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON, editing_locked=True)
+    page.apply_status(locked, RUN - timedelta(minutes=1))
+    page._change_gas(r.id, "Ar/H2")
+    page._commit([])
+    assert store.load_bookings(MON)[0].color == "A4C2F4"
+
+
+def test_load_failure_blocks_saving(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_legend(LEGEND)
+    (tmp_path / "bookings").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "bookings" / "2026-10-12.json").write_text("{壞掉", encoding="utf-8")
+    page, _ = make_page(qtbot, store)
+    page.set_week(MON)
+    wait_refreshed(qtbot, page)
+    page.calendar.rangeSelected.emit(0, 9, 10)
+    assert (tmp_path / "bookings" / "2026-10-12.json").read_text(encoding="utf-8") == "{壞掉"
+
+
+def test_unlock_triggers_refresh(qtbot, store):
+    page, occupancy = make_page(qtbot, store)
+    page.set_week(MON)
+    wait_refreshed(qtbot, page)
+    locked = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON, editing_locked=True)
+    page.apply_status(locked, RUN - timedelta(minutes=1))
+    unlocked = ServiceStatus(ServicePhase.DONE, run_at=RUN, target_monday=MON)
+    page.apply_status(unlocked, RUN + timedelta(minutes=1))
+    wait_refreshed(qtbot, page)
+    assert occupancy.calls == [MON, MON]

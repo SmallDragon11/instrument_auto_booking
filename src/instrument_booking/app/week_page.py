@@ -41,6 +41,7 @@ class WeekPage(QWidget):
         self._refreshing_for: date | None = None
         self._instrument = Instrument.TUBE_A
         self._locked = False
+        self._load_error: str | None = None
         try:
             self._legend = store.load_legend()
         except StoreError:
@@ -146,12 +147,14 @@ class WeekPage(QWidget):
             return
         self._monday = monday
         self._view = None
+        self._load_error = None
         self.week_label.setText(f"目標週：{week_range_label(monday)}")
         self.calendar.set_week(monday)
         try:
             self._requests = self._store.load_bookings(monday)
         except StoreError as e:
             self._requests = []
+            self._load_error = str(e)
             show_info(self, "error", "無法讀取預約清單", str(e), duration=-1)
         self._refresh_views()
         if not self._locked:
@@ -170,6 +173,8 @@ class WeekPage(QWidget):
             for w in (self.calendar, self.priority_list, self.delete_button, self.copy_button, self.refresh_button,
                       self.gas_combo):
                 w.setEnabled(not locked)
+            if not locked:
+                self.refresh()
 
     def refresh(self) -> None:
         """在背景重新下載預約表並更新佔用與氣體選項；失敗只顯示提示，不影響編輯。"""
@@ -227,6 +232,11 @@ class WeekPage(QWidget):
     # --- 編輯 ---
     def _commit(self, requests: list[BookingRequest]) -> bool:
         """存檔成功才更新畫面；失敗時保留原本的清單。"""
+        if self._locked or self._monday is None or self._load_error is not None:
+            self._refresh_views()
+            if self._load_error is not None:
+                show_info(self, "error", "無法修改預約清單", "這週的預約清單讀取失敗，為避免覆蓋原本的檔案，暫時不能修改：" + self._load_error)
+            return False
         try:
             self._store.save_bookings(self._monday, requests)
         except StoreError as e:
