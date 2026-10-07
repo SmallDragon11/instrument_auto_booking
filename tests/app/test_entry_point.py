@@ -39,3 +39,19 @@ def test_background_start_shows_only_tray_and_shuts_down_on_quit(qtbot, tmp_path
     assert seen == {"visible": [False], "second": False}
     assert (tmp_path / "data" / "logs" / "app.log").exists()
     assert SingleInstance(key).acquire()  # 結束時已釋放
+
+
+def test_startup_failure_is_shown_and_releases_instance(qtbot, tmp_path, monkeypatch):
+    monkeypatch.setattr(sys, "excepthook", sys.excepthook)  # main 會替換，測試後還原
+    key = f"InstrumentBooking.test.{uuid.uuid4().hex}"
+    errors = []
+    # 建立一個檔案而非目錄，讓 build_services 建立日誌資料夾時失敗
+    not_a_dir = tmp_path / "not-a-dir"
+    not_a_dir.write_text("x")
+    code = main(["app"], instance_key=key, data_dir=not_a_dir / "data",
+                profile_dir=tmp_path / "profile", session_factory=lambda url, profile: FakeSession([]),
+                show_error=lambda title, msg: errors.append((title, msg)))
+    assert code == 1
+    assert len(errors) == 1
+    assert "無法啟動" in errors[0][0]
+    assert SingleInstance(key).acquire()  # 結束時已釋放
