@@ -305,3 +305,10 @@ def test_clicking_oven_tab_hides_gas_and_drag_adds_oven_request(qtbot, store):
     page.calendar.rangeSelected.emit(0, 9, 10)
     (r,) = store.load_bookings(MON)
     assert r.instrument is Instrument.OVEN_A
+
+
+def test_copy_button_uses_fluent_tooltip(qtbot, store):
+    from qfluentwidgets import ToolTipFilter
+    page, _ = make_page(qtbot, store)
+    assert page.copy_button.toolTip()
+    assert page.copy_button.findChildren(ToolTipFilter)

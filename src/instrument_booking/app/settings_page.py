@@ -15,7 +15,7 @@ from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, LineE
 from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.app.texts import clock_label
 from instrument_booking.app.week_model import WEEKDAY_NAMES
-from instrument_booking.app.widgets import ask, show_info
+from instrument_booking.app.widgets import ask, set_fluent_tooltip, show_info
 from instrument_booking.service.automation import ServicePhase, ServiceStatus
 from instrument_booking.service.connection import NOT_SYNCED, ConnectionReport
 from instrument_booking.service.housekeeping import describe_error
@@ -96,7 +96,7 @@ class SettingsPage(QWidget):
         self.login_button = PushButton(FluentIcon.PEOPLE, "重新登入")
         self.login_button.clicked.connect(self.start_login)
         self.test_button = PushButton(FluentIcon.SYNC, "連線測試")
-        self.test_button.setToolTip("校時、登入、下載預約表、讀取氣體圖例（不寫入任何東西）")
+        set_fluent_tooltip(self.test_button, "校時、登入、下載預約表、讀取氣體圖例（不寫入任何東西）")
         self.test_button.clicked.connect(self.run_connection_test)
         buttons.addWidget(self.login_button)
         buttons.addWidget(self.test_button)

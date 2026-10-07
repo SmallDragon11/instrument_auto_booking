@@ -14,7 +14,7 @@ from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.app.texts import CLIPBOARD_HINT, status_line, week_range_label
 from instrument_booking.app.week_model import (change_gas, copy_previous_week, describe, make_request, remove,
                                                reorder, slot_warnings)
-from instrument_booking.app.widgets import ask, color_icon, show_info
+from instrument_booking.app.widgets import ask, color_icon, set_fluent_tooltip, show_info
 from instrument_booking.core.models import BookingRequest, Instrument
 from instrument_booking.service.automation import ServicePhase, ServiceStatus
 from instrument_booking.service.housekeeping import describe_error
@@ -125,7 +125,7 @@ class WeekPage(QWidget):
         self.delete_button = PushButton(FluentIcon.DELETE, "刪除所選")
         self.delete_button.clicked.connect(self._delete_selected)
         self.copy_button = PushButton(FluentIcon.COPY, "複製上週清單")
-        self.copy_button.setToolTip("把上週的預約日期 +7 天加進這週")
+        set_fluent_tooltip(self.copy_button, "把上週的預約日期 +7 天加進這週")
         self.copy_button.clicked.connect(self._copy_previous_week)
         buttons.addWidget(self.delete_button)
         buttons.addWidget(self.copy_button)

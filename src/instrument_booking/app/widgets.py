@@ -4,7 +4,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import QWidget
-from qfluentwidgets import InfoBar, InfoBarPosition, MessageBox
+from qfluentwidgets import InfoBar, InfoBarPosition, MessageBox, ToolTipFilter, ToolTipPosition
 
 
 def color_icon(hex_color: str, size: int = 14) -> QIcon:
@@ -19,6 +19,12 @@ def color_icon(hex_color: str, size: int = 14) -> QIcon:
     p.drawRoundedRect(1, 1, size - 2, size - 2, 3, 3)
     p.end()
     return QIcon(pixmap)
+
+
+def set_fluent_tooltip(widget: QWidget, text: str) -> None:
+    """用 Fluent 樣式的提示取代 Qt 原生（黑底方框）的 QToolTip。"""
+    widget.setToolTip(text)
+    widget.installEventFilter(ToolTipFilter(widget, showDelay=300, position=ToolTipPosition.TOP))
 
 
 def ask(parent: QWidget, title: str, content: str) -> bool:

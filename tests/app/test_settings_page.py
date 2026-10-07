@@ -164,3 +164,10 @@ def test_ready_phase_keeps_login_disabled(qtbot, tmp_path):
     page.apply_status(ServiceStatus(ServicePhase.READY, editing_locked=True))
     assert not page.login_button.isEnabled()
     assert "自動預約進行中" in page.lock_label.text()
+
+
+def test_test_button_uses_fluent_tooltip(qtbot, tmp_path):
+    from qfluentwidgets import ToolTipFilter
+    page, _ = make(qtbot, JsonStore(tmp_path))
+    assert page.test_button.toolTip()
+    assert page.test_button.findChildren(ToolTipFilter)
