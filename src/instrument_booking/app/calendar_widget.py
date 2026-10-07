@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from PySide6.QtCore import QPoint, QRectF, Qt, Signal
+from PySide6.QtCore import QEvent, QPoint, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 from qfluentwidgets import isDarkTheme, themeColor
@@ -83,6 +83,13 @@ class WeekCalendar(QWidget):
                 return block.request
         return None
 
+    def changeEvent(self, event: QEvent) -> None:
+        """停用時取消拖曳，避免多出預約。"""
+        if event.type() == QEvent.Type.EnabledChange and not self.isEnabled():
+            self._drag = None
+            self.update()
+        super().changeEvent(event)
+
     # --- 滑鼠 ---
     def mousePressEvent(self, event) -> None:
         if event.button() != Qt.MouseButton.LeftButton or not self.isEnabled():
@@ -100,6 +107,11 @@ class WeekCalendar(QWidget):
     def mouseMoveEvent(self, event) -> None:
         pos = event.position()
         if self._drag is not None:
+            # 放開按鍵時取消拖曳，避免多出預約
+            if not (event.buttons() & Qt.MouseButton.LeftButton):
+                self._drag = None
+                self.update()
+                return
             day, start, _ = self._drag
             self._drag = (day, start, self.geometry_model().hour_at(pos.y()))
             self.update()

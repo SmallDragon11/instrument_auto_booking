@@ -69,6 +69,33 @@ def test_paint_with_everything_does_not_crash(qtbot):
     assert cal.blocks()[1].rect.left() > cal.blocks()[0].rect.left()  # 重疊時並排
 
 
+def test_disabling_mid_drag_cancels_drag(qtbot):
+    cal = make(qtbot)
+    qtbot.mousePress(cal, Qt.MouseButton.LeftButton, pos=point(2, 10))
+    assert cal._drag is not None
+    cal.setEnabled(False)
+    assert cal._drag is None
+    cal.setEnabled(True)
+    with qtbot.assertNotEmitted(cal.rangeSelected):
+        qtbot.mouseRelease(cal, Qt.MouseButton.LeftButton, pos=point(2, 12))
+
+
+def test_move_without_button_cancels_stale_drag(qtbot):
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    cal = make(qtbot)
+    qtbot.mousePress(cal, Qt.MouseButton.LeftButton, pos=point(2, 10))
+    assert cal._drag is not None
+    # 模擬沒有按鈕的滑鼠移動事件
+    ev = QMouseEvent(QEvent.Type.MouseMove, QPointF(point(2, 12)),
+                     QPointF(cal.mapToGlobal(point(2, 12))),
+                     Qt.MouseButton.NoButton, Qt.MouseButton.NoButton,
+                     Qt.KeyboardModifier.NoModifier)
+    cal.mouseMoveEvent(ev)
+    assert cal._drag is None
+
+
 def test_text_color_for_light_and_dark_backgrounds():
     assert text_color_for("FFE599").name() == "#000000"
     assert text_color_for("1F3864").name() == "#ffffff"
