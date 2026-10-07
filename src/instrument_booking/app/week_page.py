@@ -90,7 +90,7 @@ class WeekPage(QWidget):
         toolbar = QHBoxLayout()
         self.instrument_tabs = SegmentedWidget()
         for inst in Instrument:
-            self.instrument_tabs.addItem(inst.name, inst.label, onClick=lambda i=inst: self._set_instrument(i))
+            self.instrument_tabs.addItem(inst.name, inst.label, onClick=lambda *_, i=inst: self._set_instrument(i))
         self.instrument_tabs.setCurrentItem(self._instrument.name)
         toolbar.addWidget(self.instrument_tabs)
         toolbar.addSpacing(12)

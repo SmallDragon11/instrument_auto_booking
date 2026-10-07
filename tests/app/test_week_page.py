@@ -279,3 +279,29 @@ def test_not_configured_status_counts_as_real(qtbot, store):
     page.apply_status(ServiceStatus(ServicePhase.NOT_CONFIGURED), RUN - timedelta(days=1))
     wait_refreshed(qtbot, page)
     assert occupancy.calls == [MON]
+
+
+def test_clicking_tube_c_tab_selects_instrument_and_shows_its_occupancy(qtbot, store):
+    view = WeekView(MON, frozenset({(Instrument.TUBE_C, MON, 11), (Instrument.TUBE_A, MON, 10)}), frozenset(), LEGEND)
+    page, _ = make_page(qtbot, store, occupancy=FakeOccupancy(view))
+    open_week(page)
+    wait_refreshed(qtbot, page)
+    page.instrument_tabs.items[Instrument.TUBE_C.name].click()  # 真實點擊會帶 checked=False
+    assert page._instrument is Instrument.TUBE_C
+    assert page.calendar._occupied == {(0, 11)}
+    page.calendar.rangeSelected.emit(2, 9, 11)
+    (r,) = store.load_bookings(MON)
+    assert (r.instrument, r.date) == (Instrument.TUBE_C, date(2026, 10, 14))
+
+
+def test_clicking_oven_tab_hides_gas_and_drag_adds_oven_request(qtbot, store):
+    page, _ = make_page(qtbot, store)
+    page.show()
+    open_week(page)
+    wait_refreshed(qtbot, page)
+    page.instrument_tabs.items[Instrument.OVEN_A.name].click()
+    assert page._instrument is Instrument.OVEN_A
+    assert not page.gas_combo.isVisible()
+    page.calendar.rangeSelected.emit(0, 9, 10)
+    (r,) = store.load_bookings(MON)
+    assert r.instrument is Instrument.OVEN_A
