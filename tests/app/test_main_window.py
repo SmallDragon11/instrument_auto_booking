@@ -176,3 +176,68 @@ def test_settings_change_moves_displayed_week_when_service_not_scheduled(env):
     services.automation.current = ServiceStatus(ServicePhase.IDLE)  # 延後中：尚未依新設定排程
     window._on_settings_saved(Settings(name="Zoe", spreadsheet_url=URL, run_weekday=0, run_time=time(9, 0)))
     assert window.week_page.monday == date(2026, 10, 19)
+
+
+def test_stop_is_set_before_services_shutdown(env, qtbot, monkeypatch):
+    services, _, state, _, make = env
+    window = make()
+    recorded = []
+    original_shutdown = services.shutdown
+
+    def recorded_shutdown():
+        recorded.append(("shutdown", window._stop.is_set()))
+        original_shutdown()
+
+    monkeypatch.setattr(services, "shutdown", recorded_shutdown)
+    window.request_quit()
+    qtbot.waitUntil(lambda: state["quit"] == 1)
+    assert recorded == [("shutdown", True)]
+
+
+def test_lock_starting_during_quit_dialog_still_cancels(env, qtbot):
+    services, _, state, _, make = env
+    window = make()
+
+    def custom_confirm(parent, title, content):
+        services.automation.current = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON,
+                                                    editing_locked=True)
+        return True
+
+    window._confirm = custom_confirm
+    window.request_quit()
+    qtbot.waitUntil(lambda: state["quit"] == 1)
+    assert services.automation.cancelled == 1
+
+
+def test_quit_dialog_is_not_reentrant(env):
+    services, _, state, _, make = env
+    window = make()
+    call_count = [0]
+
+    def reentrant_confirm(parent, title, content):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            window.request_quit()
+        return False
+
+    window._confirm = reentrant_confirm
+    window.request_quit()
+    assert call_count[0] == 1 and not window._stop.is_set()
+
+
+def test_tick_survives_status_errors(env):
+    services, _, _, _, make = env
+    window = make()
+    call_count = [0]
+    original_status = services.automation.status
+
+    def raising_status():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise RuntimeError("status check failed")
+        return original_status()
+
+    services.automation.status = raising_status
+    window.tick()  # first call raises, should not propagate
+    window.tick()  # second call succeeds, banner should update
+    assert "下次自動預約" in window.week_page.status_label.text()

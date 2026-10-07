@@ -88,6 +88,7 @@ class MainWindow(FluentWindow):
         self._autostart_registry = autostart_registry
         self._quitting = False
         self._quit_called = False
+        self._asking = False
         self._last_phase: ServicePhase | None = None
         self._told_tray = False
         self._settings_error: str | None = None
@@ -149,16 +150,19 @@ class MainWindow(FluentWindow):
 
     # --- 每秒更新 ---
     def tick(self) -> None:
-        status = self._services.automation.status()
-        now = self._now()
-        self.week_page.set_week(displayed_week(status.target_monday, now, self._settings))
-        self.week_page.apply_status(status, now)
-        self.settings_page.apply_status(status)
-        self.banner.show_message(banner_text(status, self._settings_error))
-        self.tray.setToolTip(f"{APP_TITLE}\n{status_line(status, now)}")
-        if status.phase is ServicePhase.READY and self._last_phase is not ServicePhase.READY:
-            self.notify("自動預約已準備好", f"{status.run_at:%H:%M} 會自動寫入。{CLIPBOARD_HINT}")
-        self._last_phase = status.phase
+        try:
+            status = self._services.automation.status()
+            now = self._now()
+            self.week_page.set_week(displayed_week(status.target_monday, now, self._settings))
+            self.week_page.apply_status(status, now)
+            self.settings_page.apply_status(status)
+            self.banner.show_message(banner_text(status, self._settings_error))
+            self.tray.setToolTip(f"{APP_TITLE}\n{status_line(status, now)}")
+            if status.phase is ServicePhase.READY and self._last_phase is not ServicePhase.READY:
+                self.notify("自動預約已準備好", f"{status.run_at:%H:%M} 會自動寫入。{CLIPBOARD_HINT}")
+            self._last_phase = status.phase
+        except Exception:
+            log.exception("更新畫面狀態失敗")
 
     # --- 通知 ---
     def notify(self, title: str, message: str) -> None:
@@ -220,16 +224,23 @@ class MainWindow(FluentWindow):
 
     # --- 結束 ---
     def request_quit(self) -> None:
-        if self._quitting:
+        if self._quitting or self._asking:
             return
         status = self._services.automation.status()
         if status.editing_locked:
-            ok = self._confirm(self, "自動預約進行中",
-                               "現在結束會取消本次自動預約（若已開始寫入，會等寫完才結束）。確定要結束嗎？")
+            dialog_title = "自動預約進行中"
         else:
-            ok = self._confirm(self, f"結束{APP_TITLE}", "結束後就不會自動預約，直到下次開啟。確定要結束嗎？")
+            dialog_title = f"結束{APP_TITLE}"
+        self._asking = True
+        try:
+            ok = self._confirm(self, dialog_title,
+                               "現在結束會取消本次自動預約（若已開始寫入，會等寫完才結束）。確定要結束嗎？" if status.editing_locked
+                               else "結束後就不會自動預約，直到下次開啟。確定要結束嗎？")
+        finally:
+            self._asking = False
         if not ok:
             return
+        status = self._services.automation.status()  # 重新讀取狀態
         if status.editing_locked:
             self._services.automation.cancel_current()
         self._quitting = True
