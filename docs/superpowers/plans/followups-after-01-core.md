@@ -60,3 +60,33 @@
 - 預檢後修改清單（保留 Edge）且同一秒手動取消 → 待命的 Edge 不會被關閉（`_cancel_cycle` 的 had_plan 判斷）；`step()` 在該時點拋例外時亦同。
 - 被隔離的損毀紀錄不再算已執行 → 該週可能補跑一次（不會覆寫，使用者會收到第二次通知）。
 - storage 依賴 service.settings 的分層、渲染卡死的看門狗、設定檔被占用的專屬提示。
+
+## Plan 04（GUI）完成後新增（2026-10-07）
+
+### 實機檢查結果（測試副本）
+
+- 第一次檢查發現：點儀器分頁後拖曳無法新增、看不到該儀器的佔用（`SegmentedWidget` 的 `clicked(bool)` 蓋掉 lambda 預設參數）；原生 tooltip 顯示成黑框；視窗最窄 991 px。皆已修正（最窄 723 px），並補上真的點擊分頁的測試。
+- 第二次檢查：6 項全部正常；Edge 無殘留。
+- 端對端實機（設定改為週三 22:40）：22:30 預檢完成（NTP，本機慢 0.05 秒），第一筆 22:40:00.532 寫入，7 筆於 22:40:02.6 前處理完（6 成功、1 與自己重疊），無錯誤。
+
+### Plan 04 文件之後的介面變更（Plan 05 請以程式碼為準）
+
+- 單一執行個體改以 `QLockFile`（`%TEMP%\<key>.lock`）保證唯一，具名管道只用來通知既有實例（Windows 允許同名多個管道伺服器）。
+- `AutomationService.run_forever`：離開迴圈時若有待處理的取消，會再跑一次 `step()` 記錄取消；`MainWindow(automation_thread=...)` 結束時在背景先 join 自動化執行緒（最多 45 秒）再 `Services.shutdown()`。
+- 佔用的自動下載改由 `WeekPage.apply_status` 在「有真實狀態且未鎖定」時觸發；`set_week` 只標記待下載。
+- 預檢失敗等待重試（RETRY_WAIT）時允許「重新登入」（連線測試仍鎖定）。
+- 設定有未儲存的變更時不進行連線測試或重新登入。
+- 執行紀錄頁：「第一筆寫入」時間取代預熱開始時間；原因中的預約 id 以「第 N 筆」顯示。
+
+### Plan 05 必須做到
+
+- PyInstaller（onedir、無主控台）：收集 qfluentwidgets 資源與 PySide6 外掛；qfluentwidgets 匯入時會 `print` 廣告，確認無主控台時不出錯；鎖定 PySide6-Fluent-Widgets 版本（主視窗依賴 `FluentWindow.widgetLayout` 內部結構）。
+- 以打包後的 exe 驗證開機自動啟動（Run 登錄 `InstrumentBooking`＝`"…exe" --background`）、背景啟動只出現在系統匣、關閉開關後移除；exe 圖示（由 `app_icon()` 產生 .ico）。
+- 正式使用前的端對端實機測試沿用「Plan 02 完成後」所列項目（跨管型爐與烘箱、09:00 與 23:00 單格、執行中強制關閉 Edge），並以 exe 從 GUI 走一次。
+
+### 延後的小問題（非阻擋）
+
+- 「重新登入」在 RETRY_WAIT→PREPARING 後最多約 1 秒仍可點；此時點下會關掉預檢保留的 Edge，該週寫入失敗。可在 `start_login` 加服務端狀態檢查。
+- 結束前一刻若執行時間剛好改變，結束時的最後一次 `step()` 可能短暫開始預檢（受 45 秒 join 與關閉服務限制）。
+- 「取消本次預約」確認後未重新判斷是否已過開放時間；單一執行個體取得鎖失敗時未區分權限錯誤；具名管道未依使用者區分；補跑時不提供取消；清單為空時仍顯示倒數。
+- 執行紀錄頁深色主題下成功／略過的文字顏色對比偏低；`HistoryPage` 失敗路徑、`MAX_CARDS` 未測。
