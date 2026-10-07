@@ -43,11 +43,20 @@ def test_no_delivery_after_shutdown(qtbot):
     tasks = BackgroundTasks()
     results = []
     gate = threading.Event()
+    started = threading.Event()
 
-    # 提交工作：等待 gate，完成時回呼 results.append
-    future = tasks.run(lambda: gate.wait(5) or "done", results.append)
+    # 提交工作：設定 started，等待 gate，完成時回呼 results.append
+    def job():
+        started.set()
+        gate.wait(5)
+        return "done"
 
-    # 立即關閉，工作仍在執行
+    future = tasks.run(job, results.append)
+
+    # 等待工作確實開始（確保不會被 cancel_futures 取消）
+    assert started.wait(5)
+
+    # 工作已在執行，現在關閉
     tasks.shutdown()
 
     # 放開 gate 讓工作完成
