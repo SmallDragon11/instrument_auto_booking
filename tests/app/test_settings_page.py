@@ -62,7 +62,7 @@ def test_changing_schedule_while_locked_needs_confirmation(qtbot, tmp_path):
     page, saved = make(qtbot, store, confirm=lambda *a: False)
     page.apply_status(ServiceStatus(ServicePhase.READY, editing_locked=True))
     page.tray_switch.setChecked(False)
-    assert page.save()  # 只改系統匣：不用確認
+    assert not store.load_settings().minimize_to_tray  # 系統匣開關即時儲存，不經確認
     set_time(page, 14, 0)
     assert not page.save()  # 改時間：使用者按了取消
     assert store.load_settings().run_time == time(13, 0)
@@ -195,3 +195,78 @@ def test_load_shows_saved_time_in_combos(qtbot, tmp_path):
     page, _ = make(qtbot, store)
     assert (page.hour_combo.currentIndex(), page.minute_combo.currentIndex()) == (9, 30)
     assert not hasattr(page, "time_picker")
+
+
+def test_tray_switch_applies_immediately(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL))
+    page, saved = make(qtbot, store)
+    assert saved == []  # 建構頁面（load）不觸發儲存
+    page.tray_switch.setChecked(False)
+    assert not store.load_settings().minimize_to_tray
+    assert len(saved) == 1 and not saved[0].minimize_to_tray
+
+
+def test_autostart_and_theme_apply_immediately(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL, autostart=True, theme="system"))
+    page, saved = make(qtbot, store)
+    page.theme_combo.setCurrentIndex(2)
+    assert store.load_settings().theme == "dark"
+    page.autostart_switch.setChecked(False)
+    assert not store.load_settings().autostart
+    assert len(saved) == 2 and saved[-1].theme == "dark"
+
+
+def test_app_settings_do_not_write_unsaved_booking_fields(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL, run_weekday=1))
+    page, saved = make(qtbot, store)
+    page.name_edit.setText("Other")
+    page.url_edit.setText("https://docs.google.com/spreadsheets/d/OTHER/edit")
+    page.weekday_combo.setCurrentIndex(4)
+    set_time(page, 8, 8)
+    page.tray_switch.setChecked(False)
+    stored = store.load_settings()
+    assert (stored.name, stored.spreadsheet_url, stored.run_weekday, stored.run_time) ==         ("Zoe", URL, 1, time(13, 0))
+    assert not stored.minimize_to_tray and saved[-1] == stored
+    assert page.name_edit.text() == "Other"  # 表單上編輯中的內容保留
+
+
+def test_app_settings_apply_even_if_saved_booking_settings_invalid_or_locked(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    page, saved = make(qtbot, store)  # 尚未設定名字、網址
+    page.apply_status(ServiceStatus(ServicePhase.READY, editing_locked=True))
+    page.theme_combo.setCurrentIndex(1)
+    assert store.load_settings().theme == "light" and len(saved) == 1
+
+
+def test_save_writes_only_booking_fields(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL, theme="dark", autostart=True, minimize_to_tray=False))
+    page, saved = make(qtbot, store)
+    page.theme_combo.blockSignals(True)  # 模擬表單上的外觀與已儲存值不同
+    page.theme_combo.setCurrentIndex(1)
+    page.name_edit.setText("Amy")
+    assert page.save()
+    stored = store.load_settings()
+    assert stored.name == "Amy"
+    assert (stored.theme, stored.autostart, stored.minimize_to_tray) == ("dark", True, False)
+    assert saved[-1] == stored
+
+
+def test_save_button_inside_booking_card(qtbot, tmp_path):
+    page, _ = make(qtbot, JsonStore(tmp_path))
+    assert page.save_button.text() == "儲存預約設定"
+    card = page.save_button.parentWidget()
+    assert card is page.name_edit.parentWidget() is not None
+
+
+def test_unsaved_changes_only_track_booking_fields(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL))
+    page, _ = make(qtbot, store)
+    page.tray_switch.setChecked(False)
+    assert not page._has_unsaved_changes()
+    page.url_edit.setText(URL + "x")
+    assert page._has_unsaved_changes()

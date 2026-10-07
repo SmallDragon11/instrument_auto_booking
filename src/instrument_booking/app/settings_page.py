@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import dataclasses
 from datetime import datetime, time
 from typing import Callable
 
@@ -52,6 +53,7 @@ class SettingsPage(QWidget):
         self._confirm = confirm
         self._locked = False
         self._busy = False
+        self._loading = False  # load() 填入控制項時，不觸發 App 設定的即時儲存
         self._retry_wait = False  # 預檢失敗等待重試中：執行緒已放棄 Edge，可重新登入
         self._build()
         self.load()
@@ -90,6 +92,12 @@ class SettingsPage(QWidget):
         when.addWidget(self.minute_combo)
         when.addStretch(1)
         form.addRow(BodyLabel("自動預約時間"), when)
+        save_row = QHBoxLayout()
+        save_row.addStretch(1)
+        self.save_button = PrimaryPushButton(FluentIcon.SAVE, "儲存預約設定")
+        self.save_button.clicked.connect(self.save)
+        save_row.addWidget(self.save_button)
+        card.layout().addLayout(save_row)
         root.addWidget(card)
 
         card, form = _card("Google 帳號")
@@ -130,18 +138,22 @@ class SettingsPage(QWidget):
         form.addRow(BodyLabel("外觀"), theme_row)
         root.addWidget(card)
 
-        save_row = QHBoxLayout()
-        save_row.addStretch(1)
-        self.save_button = PrimaryPushButton(FluentIcon.SAVE, "儲存設定")
-        self.save_button.clicked.connect(self.save)
-        save_row.addWidget(self.save_button)
-        root.addLayout(save_row)
+        self.autostart_switch.checkedChanged.connect(self._apply_app_settings)
+        self.tray_switch.checkedChanged.connect(self._apply_app_settings)
+        self.theme_combo.currentIndexChanged.connect(self._apply_app_settings)
         root.addStretch(1)
         scroll.setWidget(content)
         outer.addWidget(scroll)
 
     # --- 讀寫設定 ---
     def load(self) -> None:
+        self._loading = True
+        try:
+            self._fill()
+        finally:
+            self._loading = False
+
+    def _fill(self) -> None:
         try:
             s = self._store.load_settings()
         except StoreError as e:
@@ -156,22 +168,49 @@ class SettingsPage(QWidget):
         self.tray_switch.setChecked(s.minimize_to_tray)
         self.theme_combo.setCurrentIndex(THEMES.index(s.theme) if s.theme in THEMES else 0)
 
+    def _form_time(self) -> time:
+        return time(self.hour_combo.currentIndex(), self.minute_combo.currentIndex())
+
     def current(self) -> Settings:
         return Settings(name=self.name_edit.text().strip(), spreadsheet_url=self.url_edit.text().strip(),
-                        run_weekday=self.weekday_combo.currentIndex(), run_time=time(self.hour_combo.currentIndex(), self.minute_combo.currentIndex()),
+                        run_weekday=self.weekday_combo.currentIndex(), run_time=self._form_time(),
                         autostart=self.autostart_switch.isChecked(), minimize_to_tray=self.tray_switch.isChecked(),
                         theme=THEMES[self.theme_combo.currentIndex()])
 
+    def _saved_or_default(self) -> Settings | None:
+        try:
+            return self._store.load_settings()
+        except StoreError:
+            return None
+
+    def _apply_app_settings(self, *_args) -> None:
+        """開機啟動、系統匣、外觀即時儲存；只動這三個欄位，不寫入表單上編輯中的預約欄位。"""
+        if self._loading:
+            return
+        base = self._saved_or_default() or Settings()
+        new = dataclasses.replace(base, autostart=self.autostart_switch.isChecked(),
+                                  minimize_to_tray=self.tray_switch.isChecked(),
+                                  theme=THEMES[self.theme_combo.currentIndex()])
+        try:
+            self._store.save_settings(new)
+        except StoreError as e:
+            show_info(self, "error", "無法儲存設定", str(e))
+            return
+        self._on_saved(new)
+
     def save(self) -> bool:
-        new = self.current()
+        """儲存預約欄位（名字、網址、星期、時間）；App 區塊的欄位已即時儲存，不在此處理。"""
+        old = self._saved_or_default()
+        base = old or dataclasses.replace(
+            Settings(), autostart=self.autostart_switch.isChecked(), minimize_to_tray=self.tray_switch.isChecked(),
+            theme=THEMES[self.theme_combo.currentIndex()])
+        new = dataclasses.replace(base, name=self.name_edit.text().strip(),
+                                  spreadsheet_url=self.url_edit.text().strip(),
+                                  run_weekday=self.weekday_combo.currentIndex(), run_time=self._form_time())
         problems = validate_settings(new)
         if problems:
             show_info(self, "warning", "設定尚未儲存", "\n".join(problems), duration=6000)
             return False
-        try:
-            old = self._store.load_settings()
-        except StoreError:
-            old = None
         changes_run = old is None or (old.run_weekday, old.run_time, old.spreadsheet_url) != \
             (new.run_weekday, new.run_time, new.spreadsheet_url)
         if self._locked and changes_run and not self._confirm(
@@ -183,7 +222,7 @@ class SettingsPage(QWidget):
             show_info(self, "error", "無法儲存設定", str(e))
             return False
         self._on_saved(new)
-        show_info(self, "success", "設定已儲存")
+        show_info(self, "success", "預約設定已儲存")
         return True
 
     # --- 狀態 ---
@@ -207,18 +246,19 @@ class SettingsPage(QWidget):
 
     def _has_unsaved_changes(self) -> bool:
         """檢查設定是否有未儲存的變更。"""
-        try:
-            saved = self._store.load_settings()
-        except StoreError:
+        saved = self._saved_or_default()
+        if saved is None:
             return True
-        return self.current() != saved
+        return (saved.name, saved.spreadsheet_url, saved.run_weekday, saved.run_time) != \
+            (self.name_edit.text().strip(), self.url_edit.text().strip(), self.weekday_combo.currentIndex(),
+             self._form_time())
 
     # --- Google 帳號 ---
     def start_login(self) -> None:
         if not self._login_allowed():
             return
         if self._has_unsaved_changes():
-            show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存設定」再測試連線或重新登入。")
+            show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存預約設定」再測試連線或重新登入。")
             return
         self._set_busy(True)
         self._tasks.run(self._start_login, self._login_started, self._login_failed)
@@ -235,7 +275,7 @@ class SettingsPage(QWidget):
         if self._locked or self._busy:
             return
         if self._has_unsaved_changes():
-            show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存設定」再測試連線或重新登入。")
+            show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存預約設定」再測試連線或重新登入。")
             return
         self._set_busy(True)
         self.account_label.setText("測試中：校時、開啟試算表、下載預約表…")
