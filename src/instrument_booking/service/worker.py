@@ -1,6 +1,7 @@
 """唯一操作瀏覽器的執行緒（Playwright 同步物件只能在建立它的執行緒使用；同一設定檔同時只能有一個 Edge）。"""
 from __future__ import annotations
 
+import threading
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import Callable, Protocol, TypeVar
 
@@ -22,6 +23,8 @@ class BrowserWorker:
         self._factory = session_factory
         self._session: Session | None = None
         self._hold = False  # 保留中：預檢後待命寫入的 Edge 不可被其他工作關閉（只在瀏覽器執行緒讀寫）
+        self._shutdown_lock = threading.Lock()
+        self._shut_down = False
 
     def submit(self, job: Callable[[Session], T], *, keep_open: bool = False,
                hold: bool | None = None) -> Future[T]:
@@ -36,6 +39,11 @@ class BrowserWorker:
         return self._executor.submit(self._close)
 
     def shutdown(self) -> None:
+        """關閉瀏覽器並停止執行緒；可重複呼叫（第二次起不做任何事）。"""
+        with self._shutdown_lock:
+            if self._shut_down:
+                return
+            self._shut_down = True
         self.close_session().result()
         self._executor.shutdown(wait=True)
 

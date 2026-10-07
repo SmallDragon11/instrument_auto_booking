@@ -117,3 +117,11 @@ def test_close_session_closes_and_releases_hold(setup):
     assert [e for e, _ in log] == ["start", "close"]
     worker.submit(lambda s: None).result()
     assert [e for e, _ in log] == ["start", "close", "start", "close"]  # 已解除保留
+
+
+def test_shutdown_can_be_called_twice(setup):
+    worker, log, _ = setup
+    worker.submit(lambda s: None, keep_open=True).result()
+    worker.shutdown()
+    worker.shutdown()  # 例如 GUI 結束流程與測試清理都呼叫
+    assert [e for e, _ in log] == ["start", "close"]
