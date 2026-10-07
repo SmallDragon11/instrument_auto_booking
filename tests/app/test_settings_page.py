@@ -1,11 +1,12 @@
 import threading
-from datetime import time
+from datetime import datetime, time
 
 from PySide6.QtCore import QTime
 
 from instrument_booking.app.settings_page import SettingsPage
 from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.service.automation import ServicePhase, ServiceStatus
+from instrument_booking.core.models import TAIPEI
 from instrument_booking.service.connection import ConnectionReport
 from instrument_booking.service.settings import Settings
 from instrument_booking.storage.json_store import JsonStore
@@ -140,3 +141,26 @@ def test_unsaved_changes_block_connection_test_and_login(qtbot, tmp_path):
     page.run_connection_test()
     qtbot.waitUntil(lambda: len(connection_calls) > 0, timeout=1000)
     assert len(connection_calls) == 1
+
+
+def test_retry_wait_allows_login_but_not_connection_test(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL))
+    calls = []
+    page, _ = make(qtbot, store, login=lambda: calls.append("login"))
+    retry_at = datetime(2026, 10, 9, 12, 58, tzinfo=TAIPEI)
+    page.apply_status(ServiceStatus(ServicePhase.RETRY_WAIT, editing_locked=True, retry_at=retry_at))
+    assert page.login_button.isEnabled() and not page.test_button.isEnabled()
+    assert page.lock_label.isVisibleTo(page) and "12:58" in page.lock_label.text()
+    assert "重新登入" in page.lock_label.text()
+    page.start_login()
+    qtbot.waitUntil(lambda: calls == ["login"])
+    page.apply_status(ServiceStatus(ServicePhase.RETRY_WAIT, editing_locked=True))  # 沒有時間也不應出錯
+    assert "重新登入" in page.lock_label.text()
+
+
+def test_ready_phase_keeps_login_disabled(qtbot, tmp_path):
+    page, _ = make(qtbot, JsonStore(tmp_path))
+    page.apply_status(ServiceStatus(ServicePhase.READY, editing_locked=True))
+    assert not page.login_button.isEnabled()
+    assert "自動預約進行中" in page.lock_label.text()

@@ -16,13 +16,14 @@ from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.app.texts import clock_label
 from instrument_booking.app.week_model import WEEKDAY_NAMES
 from instrument_booking.app.widgets import ask, show_info
-from instrument_booking.service.automation import ServiceStatus
+from instrument_booking.service.automation import ServicePhase, ServiceStatus
 from instrument_booking.service.connection import NOT_SYNCED, ConnectionReport
 from instrument_booking.service.housekeeping import describe_error
 from instrument_booking.service.settings import THEMES, Settings, validate_settings
 from instrument_booking.storage.json_store import StoreError
 
 THEME_LABELS = {"system": "跟隨系統", "light": "淺色", "dark": "深色"}
+LOCK_TEXT = "自動預約進行中，暫時不能重新登入或測試連線。"
 LOGIN_STARTED = "已開啟 Edge：請登入 Google 並確認看得到預約表，完成後關閉該視窗，再按「連線測試」確認。"
 
 
@@ -52,6 +53,7 @@ class SettingsPage(QWidget):
         self._confirm = confirm
         self._locked = False
         self._busy = False
+        self._retry_wait = False  # 預檢失敗等待重試中：執行緒已放棄 Edge，可重新登入
         self._build()
         self.load()
 
@@ -100,7 +102,7 @@ class SettingsPage(QWidget):
         buttons.addWidget(self.test_button)
         buttons.addStretch(1)
         form.addRow("", buttons)
-        self.lock_label = CaptionLabel("自動預約進行中，暫時不能重新登入或測試連線。")
+        self.lock_label = CaptionLabel(LOCK_TEXT)
         self.lock_label.hide()
         form.addRow("", self.lock_label)
         root.addWidget(card)
@@ -182,15 +184,22 @@ class SettingsPage(QWidget):
 
     # --- 狀態 ---
     def apply_status(self, status: ServiceStatus) -> None:
-        if status.editing_locked != self._locked:
-            self._locked = status.editing_locked
-            self.lock_label.setVisible(self._locked)
-            self._update_buttons()
+        self._locked = status.editing_locked
+        self._retry_wait = status.editing_locked and status.phase is ServicePhase.RETRY_WAIT
+        if self._retry_wait:
+            until = f" {status.retry_at:%H:%M} 前" if status.retry_at is not None else "下次重試前"
+            self.lock_label.setText(f"預檢失敗，等待重試中：如需重新登入，請在{until}登入完成並關閉該 Edge 視窗。")
+        else:
+            self.lock_label.setText(LOCK_TEXT)
+        self.lock_label.setVisible(self._locked)
+        self._update_buttons()
 
     def _update_buttons(self) -> None:
-        enabled = not self._locked and not self._busy
-        self.login_button.setEnabled(enabled)
-        self.test_button.setEnabled(enabled)
+        self.login_button.setEnabled(self._login_allowed())
+        self.test_button.setEnabled(not self._locked and not self._busy)
+
+    def _login_allowed(self) -> bool:
+        return (not self._locked or self._retry_wait) and not self._busy
 
     def _has_unsaved_changes(self) -> bool:
         """檢查設定是否有未儲存的變更。"""
@@ -202,7 +211,7 @@ class SettingsPage(QWidget):
 
     # --- Google 帳號 ---
     def start_login(self) -> None:
-        if self._locked or self._busy:
+        if not self._login_allowed():
             return
         if self._has_unsaved_changes():
             show_info(self, "warning", "請先儲存設定", "設定有尚未儲存的變更，請先按「儲存設定」再測試連線或重新登入。")
