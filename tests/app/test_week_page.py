@@ -312,3 +312,15 @@ def test_copy_button_uses_fluent_tooltip(qtbot, store):
     page, _ = make_page(qtbot, store)
     assert page.copy_button.toolTip()
     assert page.copy_button.findChildren(ToolTipFilter)
+
+
+def test_header_labels_do_not_wrap_at_default_width(qtbot, store):
+    page, _ = make_page(qtbot, store)
+    page.resize(1200, 760)
+    page.show()
+    qtbot.waitExposed(page)
+    open_week(page)
+    page.layout().activate()
+    line = page.week_label.fontMetrics().height() * 1.5
+    assert page.week_label.height() <= line
+    assert page.status_label.height() <= line
