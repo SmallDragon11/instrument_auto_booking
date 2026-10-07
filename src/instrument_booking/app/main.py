@@ -59,10 +59,12 @@ def main(argv: list[str] | None = None, *, instance_key: str = INSTANCE_KEY, dat
         notifier = QtNotifier()
         extra = {} if session_factory is None else {"session_factory": session_factory}
         services = build_services(notifier, data_dir=data_dir, profile_dir=profile_dir, **extra)
+        automation_thread = threading.Thread(target=services.automation.run_forever, args=(stop,),
+                                             name="automation", daemon=True)
         window = MainWindow(services, notifier, stop=stop, autostart_command=launch_command(),
-                            autostart_registry=RunKey())
+                            autostart_registry=RunKey(), automation_thread=automation_thread)
         instance.activated.connect(window.show_window)
-        threading.Thread(target=services.automation.run_forever, args=(stop,), name="automation", daemon=True).start()
+        automation_thread.start()
         background = BACKGROUND_ARG in argv
         log.info("App 啟動%s", "（背景）" if background else "")
         if not background:

@@ -34,6 +34,7 @@ log = logging.getLogger(LOGGER_NAME)
 APP_TITLE = "實驗規劃助手"
 TICK_MS = 1000
 SHUTDOWN_TIMEOUT_MS = 60_000  # 結束時最多等瀏覽器工作（例如寫入中）多久
+AUTOMATION_JOIN_TIMEOUT = 45  # 結束時最多等自動化執行緒記錄取消多久（秒；須小於 SHUTDOWN_TIMEOUT_MS）
 THEME = {"system": Theme.AUTO, "light": Theme.LIGHT, "dark": Theme.DARK}
 
 
@@ -77,10 +78,12 @@ class MainWindow(FluentWindow):
                  autostart_command: str | None, autostart_registry: Registry | None,
                  now: Callable[[], datetime] = lambda: datetime.now(TAIPEI),
                  confirm: Callable[[QWidget, str, str], bool] = ask,
-                 quit_app: Callable[[], None] = QApplication.quit) -> None:
+                 quit_app: Callable[[], None] = QApplication.quit,
+                 automation_thread: threading.Thread | None = None) -> None:
         super().__init__()
         self._services = services
         self._stop = stop
+        self._automation_thread = automation_thread
         self._now = now
         self._confirm = confirm
         self._quit_app = quit_app
@@ -90,6 +93,7 @@ class MainWindow(FluentWindow):
         self._quit_called = False
         self._asking = False
         self._last_phase: ServicePhase | None = None
+        self._ready_notified_for: datetime | None = None
         self._told_tray = False
         self._settings_error: str | None = None
         try:
@@ -140,7 +144,8 @@ class MainWindow(FluentWindow):
         notifier.notified.connect(self._on_notified)
         self._shutdown_finished.connect(self._finish_quit)
         self._apply_theme(self._settings.theme)
-        self._apply_autostart(self._settings.autostart)
+        if self._settings_error is None:  # 設定檔損毀時用的是預設值，不能據此改動開機自動啟動
+            self._apply_autostart(self._settings.autostart)
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.tick)
@@ -158,7 +163,9 @@ class MainWindow(FluentWindow):
             self.settings_page.apply_status(status)
             self.banner.show_message(banner_text(status, self._settings_error))
             self.tray.setToolTip(f"{APP_TITLE}\n{status_line(status, now)}")
-            if status.phase is ServicePhase.READY and self._last_phase is not ServicePhase.READY:
+            if (status.phase is ServicePhase.READY and self._last_phase is not ServicePhase.READY
+                    and status.run_at != self._ready_notified_for):  # 每個預約時間只通知一次
+                self._ready_notified_for = status.run_at
                 self.notify("自動預約已準備好", f"{status.run_at:%H:%M} 會自動寫入。{CLIPBOARD_HINT}")
             self._last_phase = status.phase
         except Exception:
@@ -204,6 +211,8 @@ class MainWindow(FluentWindow):
             self.show_window()
 
     def show_window(self) -> None:
+        if self._quitting:  # 結束中不讓第二個實例把關閉中的視窗叫回來
+            return
         self.show()
         self.setWindowState(self.windowState() & ~Qt.WindowState.WindowMinimized)
         self.raise_()
@@ -226,6 +235,7 @@ class MainWindow(FluentWindow):
     def request_quit(self) -> None:
         if self._quitting or self._asking:
             return
+        self.show_window()  # 視窗隱藏在系統匣時，確認對話框（子視窗）會看不到
         status = self._services.automation.status()
         if status.editing_locked:
             dialog_title = "自動預約進行中"
@@ -253,6 +263,9 @@ class MainWindow(FluentWindow):
         QTimer.singleShot(SHUTDOWN_TIMEOUT_MS, self._finish_quit)
 
     def _shutdown_services(self) -> None:
+        thread = self._automation_thread
+        if thread is not None and thread.is_alive():
+            thread.join(AUTOMATION_JOIN_TIMEOUT)  # 等它處理完待處理的取消，再關閉瀏覽器
         try:
             self._services.shutdown()
         except Exception:

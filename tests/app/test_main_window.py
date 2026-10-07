@@ -1,5 +1,6 @@
 import logging
 import threading
+import time as time_module
 from datetime import date, datetime, time
 
 import pytest
@@ -69,10 +70,10 @@ def env(qtbot, tmp_path):
         state["asked"].append(title)
         return state["answer"]
 
-    def make():
+    def make(**extra):
         window = MainWindow(services, notifier, stop=threading.Event(), autostart_command='"x.exe" --background',
                             autostart_registry=registry, now=lambda: NOW, confirm=confirm,
-                            quit_app=lambda: state.__setitem__("quit", state["quit"] + 1))
+                            quit_app=lambda: state.__setitem__("quit", state["quit"] + 1), **extra)
         qtbot.addWidget(window)
         return window
     yield services, notifier, state, registry, make
@@ -241,3 +242,80 @@ def test_tick_survives_status_errors(env):
     window.tick()  # first call raises, should not propagate
     window.tick()  # second call succeeds, banner should update
     assert "下次自動預約" in window.week_page.status_label.text()
+
+
+def test_shutdown_joins_automation_thread_before_services_shutdown(env, qtbot, monkeypatch):
+    services, _, state, _, make = env
+    done = threading.Event()
+
+    def slow_automation():
+        time_module.sleep(0.3)  # 模擬 run_forever 離開前還在處理取消
+        done.set()
+
+    thread = threading.Thread(target=slow_automation)
+    thread.start()
+    window = make(automation_thread=thread)
+    recorded = []
+    original_shutdown = services.shutdown
+
+    def recorded_shutdown():
+        recorded.append(done.is_set())
+        original_shutdown()
+
+    monkeypatch.setattr(services, "shutdown", recorded_shutdown)
+    window.request_quit()
+    qtbot.waitUntil(lambda: state["quit"] == 1)
+    assert recorded == [True]
+
+
+def test_request_quit_shows_hidden_window_before_asking(env):
+    _, _, state, _, make = env
+    window = make()
+    window.show()
+    window.hide()
+    seen = []
+
+    def confirm(parent, title, content):
+        seen.append(window.isVisible())
+        return False
+
+    window._confirm = confirm
+    window.request_quit()
+    assert seen == [True]
+
+
+def test_show_window_is_ignored_while_quitting(env):
+    _, _, _, _, make = env
+    window = make()
+    window._quitting = True
+    window.hide()
+    window.show_window()
+    assert not window.isVisible()
+
+
+def test_ready_notification_is_sent_once_per_run_at(env, monkeypatch):
+    services, _, _, _, make = env
+    window = make()
+    shown = []
+    monkeypatch.setattr(window, "notify", lambda title, message: shown.append((title, message)))
+    ready = ServiceStatus(ServicePhase.READY, run_at=RUN, target_monday=MON, editing_locked=True)
+    preparing = ServiceStatus(ServicePhase.PREPARING, run_at=RUN, target_monday=MON, editing_locked=True)
+    for status in (ready, preparing, ready):  # 修改清單後重新預檢：READY → PREPARING → READY
+        services.automation.current = status
+        window.tick()
+    assert len(shown) == 1
+    later = RUN.replace(day=16)
+    services.automation.current = ServiceStatus(ServicePhase.IDLE, run_at=later, target_monday=MON)
+    window.tick()
+    services.automation.current = ServiceStatus(ServicePhase.READY, run_at=later, target_monday=MON,
+                                                editing_locked=True)
+    window.tick()
+    assert len(shown) == 2
+
+
+def test_corrupt_settings_do_not_touch_autostart(env):
+    services, _, _, registry, make = env
+    (services.store.root / "settings.json").write_text("{ 損毀", encoding="utf-8")
+    window = make()
+    assert window._settings_error is not None
+    assert registry.values == {}
