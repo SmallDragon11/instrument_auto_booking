@@ -109,7 +109,7 @@ def run_title(record: RunRecord) -> str:
 def run_meta(record: RunRecord) -> list[str]:
     """執行時間、是否延遲、校時與快照時間。"""
     started = to_taipei(record.started_at)
-    # D2：若有結果有寫入時間，顯示最早的寫入時間；否則顯示執行時間
+    # 有寫入時間時顯示第一筆實際寫入的時間（started_at 是開放前預熱開始的時間）
     written_times = [to_taipei(r.written_at) for r in record.results if r.written_at is not None]
     if written_times:
         earliest_written = min(written_times)
@@ -135,14 +135,13 @@ def result_rows(record: RunRecord) -> list[ResultRow]:
             rows.append(ResultRow(i, describe(req), "－ 未執行", "", "none"))
             continue
         details = [x for x in (res.reason, res.warning) if x]
-        # D1：將 reason/warning 中的 request id 替換為「第 N 筆」
+        # 原因中的預約 id 改以優先序「第 N 筆」顯示
         for j, detail in enumerate(details):
-            if detail:
-                for request_id, priority in id_to_priority.items():
-                    # 先取代 " id " 形式（中間有空格的），再取代裸露的 id
-                    detail = detail.replace(f" {request_id} ", f"第 {priority} 筆")
-                    detail = detail.replace(request_id, f"第 {priority} 筆")
-                details[j] = detail
+            for request_id, priority in id_to_priority.items():
+                # 先取代 " id " 形式（中間有空格的），再取代裸露的 id
+                detail = detail.replace(f" {request_id} ", f"第 {priority} 筆")
+                detail = detail.replace(request_id, f"第 {priority} 筆")
+            details[j] = detail
         if res.written_at is not None:
             written = to_taipei(res.written_at)
             details.append(f"寫入於 {written:%H:%M:%S}.{written.microsecond // 1000:03d}")
