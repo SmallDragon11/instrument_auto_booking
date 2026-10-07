@@ -1,8 +1,6 @@
 import threading
 from datetime import datetime, time
 
-from PySide6.QtCore import QTime
-
 from instrument_booking.app.settings_page import SettingsPage
 from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.service.automation import ServicePhase, ServiceStatus
@@ -23,6 +21,11 @@ def make(qtbot, store, *, report=None, login=None, confirm=lambda *a: True):
     return page, saved
 
 
+def set_time(page, hour, minute):
+    page.hour_combo.setCurrentIndex(hour)
+    page.minute_combo.setCurrentIndex(minute)
+
+
 def test_loads_existing_settings(qtbot, tmp_path):
     store = JsonStore(tmp_path)
     s = Settings(name="Zoe", spreadsheet_url=URL, run_weekday=2, run_time=time(9, 30), autostart=False, theme="dark")
@@ -37,7 +40,7 @@ def test_save_strips_and_persists_then_notifies(qtbot, tmp_path):
     page.name_edit.setText(" Zoe ")
     page.url_edit.setText(URL + " ")
     page.weekday_combo.setCurrentIndex(0)
-    page.time_picker.setTime(QTime(12, 45))
+    set_time(page, 12, 45)
     assert page.save()
     expected = Settings(name="Zoe", spreadsheet_url=URL, run_weekday=0, run_time=time(12, 45))
     assert store.load_settings() == expected and saved == [expected]
@@ -60,7 +63,7 @@ def test_changing_schedule_while_locked_needs_confirmation(qtbot, tmp_path):
     page.apply_status(ServiceStatus(ServicePhase.READY, editing_locked=True))
     page.tray_switch.setChecked(False)
     assert page.save()  # 只改系統匣：不用確認
-    page.time_picker.setTime(QTime(14, 0))
+    set_time(page, 14, 0)
     assert not page.save()  # 改時間：使用者按了取消
     assert store.load_settings().run_time == time(13, 0)
 
@@ -171,3 +174,24 @@ def test_test_button_uses_fluent_tooltip(qtbot, tmp_path):
     page, _ = make(qtbot, JsonStore(tmp_path))
     assert page.test_button.toolTip()
     assert page.test_button.findChildren(ToolTipFilter)
+
+
+def test_time_combos_persist_selected_time(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    page, _ = make(qtbot, store)
+    assert [page.hour_combo.itemText(i) for i in (0, 9, 23)] == ["00", "09", "23"]
+    assert page.hour_combo.count() == 24 and page.minute_combo.count() == 60
+    assert page.minute_combo.itemText(5) == "05"
+    page.name_edit.setText("Zoe")
+    page.url_edit.setText(URL)
+    set_time(page, 14, 5)
+    assert page.save()
+    assert store.load_settings().run_time == time(14, 5)
+
+
+def test_load_shows_saved_time_in_combos(qtbot, tmp_path):
+    store = JsonStore(tmp_path)
+    store.save_settings(Settings(name="Zoe", spreadsheet_url=URL, run_time=time(9, 30)))
+    page, _ = make(qtbot, store)
+    assert (page.hour_combo.currentIndex(), page.minute_combo.currentIndex()) == (9, 30)
+    assert not hasattr(page, "time_picker")

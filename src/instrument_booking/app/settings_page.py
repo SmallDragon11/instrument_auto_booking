@@ -7,10 +7,9 @@ from __future__ import annotations
 from datetime import datetime, time
 from typing import Callable
 
-from PySide6.QtCore import QTime
 from PySide6.QtWidgets import QFormLayout, QHBoxLayout, QVBoxLayout, QWidget
 from qfluentwidgets import (BodyLabel, CaptionLabel, ComboBox, FluentIcon, LineEdit, PrimaryPushButton, PushButton,
-                            ScrollArea, SimpleCardWidget, StrongBodyLabel, SubtitleLabel, SwitchButton, TimePicker)
+                            ScrollArea, SimpleCardWidget, StrongBodyLabel, SubtitleLabel, SwitchButton)
 
 from instrument_booking.app.tasks import BackgroundTasks
 from instrument_booking.app.texts import clock_label
@@ -81,9 +80,14 @@ class SettingsPage(QWidget):
         self.weekday_combo = ComboBox()
         for name in WEEKDAY_NAMES:
             self.weekday_combo.addItem(f"每週{name}")
-        self.time_picker = TimePicker()
+        self.hour_combo = ComboBox()
+        self.hour_combo.addItems([f"{h:02d}" for h in range(24)])
+        self.minute_combo = ComboBox()
+        self.minute_combo.addItems([f"{m:02d}" for m in range(60)])
         when.addWidget(self.weekday_combo)
-        when.addWidget(self.time_picker)
+        when.addWidget(self.hour_combo)
+        when.addWidget(BodyLabel(":"))
+        when.addWidget(self.minute_combo)
         when.addStretch(1)
         form.addRow(BodyLabel("自動預約時間"), when)
         root.addWidget(card)
@@ -146,15 +150,15 @@ class SettingsPage(QWidget):
         self.name_edit.setText(s.name)
         self.url_edit.setText(s.spreadsheet_url)
         self.weekday_combo.setCurrentIndex(s.run_weekday if 0 <= s.run_weekday <= 6 else Settings().run_weekday)
-        self.time_picker.setTime(QTime(s.run_time.hour, s.run_time.minute))
+        self.hour_combo.setCurrentIndex(s.run_time.hour)
+        self.minute_combo.setCurrentIndex(s.run_time.minute)
         self.autostart_switch.setChecked(s.autostart)
         self.tray_switch.setChecked(s.minimize_to_tray)
         self.theme_combo.setCurrentIndex(THEMES.index(s.theme) if s.theme in THEMES else 0)
 
     def current(self) -> Settings:
-        t = self.time_picker.time
         return Settings(name=self.name_edit.text().strip(), spreadsheet_url=self.url_edit.text().strip(),
-                        run_weekday=self.weekday_combo.currentIndex(), run_time=time(t.hour(), t.minute()),
+                        run_weekday=self.weekday_combo.currentIndex(), run_time=time(self.hour_combo.currentIndex(), self.minute_combo.currentIndex()),
                         autostart=self.autostart_switch.isChecked(), minimize_to_tray=self.tray_switch.isChecked(),
                         theme=THEMES[self.theme_combo.currentIndex()])
 
