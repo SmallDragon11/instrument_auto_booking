@@ -15,26 +15,39 @@ def test_second_instance_activates_first_and_exits(qtbot):
     third.release()
 
 
-def test_losing_a_simultaneous_start_hands_off_instead_of_crashing(qtbot, monkeypatch):
-    # 測試當 listen 失敗時，會重新嘗試探查並連接到現有實例
+def test_lock_keeps_single_instance_when_probe_misses(qtbot, monkeypatch):
+    # 即使第一次探查失敗（對方剛啟動、還沒監聽），檔案鎖也保證只有一個實例成功啟動
     key = f"InstrumentBooking.test.{uuid.uuid4().hex}"
     winner = SingleInstance(key)
     assert winner.acquire()
     loser = SingleInstance(key)
 
-    # 模擬 listen 失敗：第一次建立伺服器時 listen 會失敗
-    from PySide6.QtNetwork import QLocalServer
-    original_listen = QLocalServer.listen
-    listen_should_fail = [True]
+    # 模擬探查失敗：只讓後起者的第一次探查失敗
+    real = SingleInstance._notify_existing
+    first_call = [True]
 
-    def mock_listen(self, name):
-        if listen_should_fail[0] and self is loser._server:
-            listen_should_fail[0] = False
+    def failing_then_real(self):
+        if first_call[0]:
+            first_call[0] = False
             return False
-        return original_listen(self, name)
+        return real(self)
 
-    monkeypatch.setattr(QLocalServer, "listen", mock_listen)
+    monkeypatch.setattr(loser, "_notify_existing", failing_then_real.__get__(loser, SingleInstance))
 
-    with qtbot.waitSignal(winner.activated, timeout=3000):
+    with qtbot.waitSignal(winner.activated, timeout=5000):
         assert loser.acquire() is False
     winner.release()
+
+
+def test_release_frees_lock_for_next_instance(tmp_path):
+    # 釋放後，同名的其他實例可以取得鎖
+    key = f"InstrumentBooking.test.{uuid.uuid4().hex}"
+    lock_path = tmp_path / "test.lock"
+
+    a = SingleInstance(key, lock_path=lock_path)
+    assert a.acquire()
+    a.release()
+
+    b = SingleInstance(key, lock_path=lock_path)
+    assert b.acquire()
+    b.release()
