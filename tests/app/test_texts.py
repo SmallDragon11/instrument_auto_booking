@@ -76,8 +76,10 @@ def record(**kw):
 def test_run_title_and_meta():
     r = record()
     assert run_title(r) == "10/12（一）– 10/18（日） 的預約"
-    assert run_meta(r) == ["執行時間：10/9（五）13:00:00", "校時：NTP（本機時鐘慢 0.60 秒）", "預約表下載於 12:50:03"]
-    late = record(late=True, clock_source=None, clock_diff=None, snapshot_at=None)
+    # D2：記錄有 written_at 時，顯示「第一筆寫入」
+    assert run_meta(r) == ["第一筆寫入：10/9（五）13:00:00", "校時：NTP（本機時鐘慢 0.60 秒）", "預約表下載於 12:50:03"]
+    # 無寫入時間時（例如預檢失敗），顯示「執行時間」
+    late = record(late=True, clock_source=None, clock_diff=None, snapshot_at=None, results=())
     assert run_meta(late) == ["執行時間：10/9（五）13:00:00（延遲執行）", "未校時"]
 
 
@@ -93,3 +95,36 @@ def test_result_rows_follow_priority_and_mark_missing_results():
 def test_every_item_status_has_icon_and_kind():
     assert set(STATUS_ICON) == set(ItemStatus)
     assert set(_KIND) == set(ItemStatus)
+
+
+def test_result_rows_replaces_request_id_with_priority_in_reason():
+    """D1：將「與自己重疊」的原因中的 request id 改為「第 N 筆」。"""
+    a = BookingRequest("a", Instrument.TUBE_A, MON, 9, 12, "Ar", "A4C2F4")
+    b = BookingRequest("b", Instrument.OVEN_B, MON, 13, 14, None, "A4C2F4")
+    r = record(requests=(a, b),
+               results=(ItemResult("a", ItemStatus.SUCCESS),
+                        ItemResult("b", ItemStatus.SELF_OVERLAP, reason=f"與已成功寫入的 {a.id} 重疊")))
+    rows = result_rows(r)
+    assert rows[1].detail == "與已成功寫入的第 1 筆重疊"
+
+
+def test_run_meta_shows_first_written_at_if_exists():
+    """D2：若有結果寫入時間，顯示最早的作為「第一筆寫入」；否則顯示「執行時間」。"""
+    # 有寫入時間的情況
+    r = record(results=(ItemResult("a", ItemStatus.SUCCESS,
+                                   written_at=datetime(2026, 10, 9, 13, 0, 0, 412345, tzinfo=TAIPEI)),))
+    meta = run_meta(r)
+    assert meta[0] == "第一筆寫入：10/9（五）13:00:00"
+
+    # 無寫入時間的情況（例如預檢失敗）
+    r_no_written = record(results=())
+    meta_no_written = run_meta(r_no_written)
+    assert meta_no_written[0] == "執行時間：10/9（五）13:00:00"
+
+    # 有多個結果時，應該顯示最早的
+    r_multi = record(results=(
+        ItemResult("a", ItemStatus.SUCCESS, written_at=datetime(2026, 10, 9, 13, 0, 5, tzinfo=TAIPEI)),
+        ItemResult("b", ItemStatus.SUCCESS, written_at=datetime(2026, 10, 9, 13, 0, 2, tzinfo=TAIPEI)),
+    ))
+    meta_multi = run_meta(r_multi)
+    assert meta_multi[0] == "第一筆寫入：10/9（五）13:00:02"

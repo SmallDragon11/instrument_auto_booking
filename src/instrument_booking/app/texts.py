@@ -109,7 +109,13 @@ def run_title(record: RunRecord) -> str:
 def run_meta(record: RunRecord) -> list[str]:
     """執行時間、是否延遲、校時與快照時間。"""
     started = to_taipei(record.started_at)
-    lines = [f"執行時間：{when_label(started)}:{started:%S}" + ("（延遲執行）" if record.late else "")]
+    # D2：若有結果有寫入時間，顯示最早的寫入時間；否則顯示執行時間
+    written_times = [to_taipei(r.written_at) for r in record.results if r.written_at is not None]
+    if written_times:
+        earliest_written = min(written_times)
+        lines = [f"第一筆寫入：{when_label(earliest_written)}:{earliest_written:%S}" + ("（延遲執行）" if record.late else "")]
+    else:
+        lines = [f"執行時間：{when_label(started)}:{started:%S}" + ("（延遲執行）" if record.late else "")]
     lines.append(clock_label(record.clock_source, record.clock_diff))
     if record.snapshot_at is not None:
         lines.append(f"預約表下載於 {to_taipei(record.snapshot_at):%H:%M:%S}")
@@ -119,6 +125,9 @@ def run_meta(record: RunRecord) -> list[str]:
 def result_rows(record: RunRecord) -> list[ResultRow]:
     """依優先序列出每一筆；沒有結果的（例如預檢失敗）為「未執行」。"""
     results = {r.request_id: r for r in record.results}
+    # 建立 request id 到優先序的對應表，用於將 id 替換為「第 N 筆」
+    id_to_priority = {req.id: i for i, req in enumerate(record.requests, start=1)}
+
     rows = []
     for i, req in enumerate(record.requests, start=1):
         res = results.get(req.id)
@@ -126,6 +135,14 @@ def result_rows(record: RunRecord) -> list[ResultRow]:
             rows.append(ResultRow(i, describe(req), "－ 未執行", "", "none"))
             continue
         details = [x for x in (res.reason, res.warning) if x]
+        # D1：將 reason/warning 中的 request id 替換為「第 N 筆」
+        for j, detail in enumerate(details):
+            if detail:
+                for request_id, priority in id_to_priority.items():
+                    # 先取代 " id " 形式（中間有空格的），再取代裸露的 id
+                    detail = detail.replace(f" {request_id} ", f"第 {priority} 筆")
+                    detail = detail.replace(request_id, f"第 {priority} 筆")
+                details[j] = detail
         if res.written_at is not None:
             written = to_taipei(res.written_at)
             details.append(f"寫入於 {written:%H:%M:%S}.{written.microsecond // 1000:03d}")
