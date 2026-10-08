@@ -83,9 +83,16 @@ def package_zip(app_dir: Path, root: Path, out_zip: Path, version: str) -> list[
         return z.namelist()
 
 
+def clean_previous_outputs(build_dir: Path, dist_dir: Path, version: str) -> None:
+    """建置前刪掉上次的 zip 與自我檢查結果，避免這次失敗時殘留舊檔被誤認為成功。"""
+    (dist_dir / f"{APP_NAME}-{version}.zip").unlink(missing_ok=True)
+    (build_dir / "self-check.txt").unlink(missing_ok=True)
+
+
 def main() -> int:
     version = project_version()
     build_dir, dist_dir = ROOT / "build", ROOT / "dist"
+    clean_previous_outputs(build_dir, dist_dir, version)
     icon, version_file = build_dir / f"{APP_NAME}.ico", build_dir / "version_info.txt"
     write_icon(icon)
     version_file.write_text(version_file_text(version), encoding="utf-8")

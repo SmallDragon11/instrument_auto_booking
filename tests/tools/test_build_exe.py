@@ -51,3 +51,17 @@ def test_package_zip_contains_app_installer_and_guide(build_exe, tmp_path):
     ]
     with zipfile.ZipFile(tmp_path / "out.zip") as z:
         assert z.read("ExperimentPlanner-0.1.0/使用說明.txt") == (build_exe.ROOT / "docs" / "使用說明.md").read_bytes()
+
+
+def test_clean_previous_outputs_removes_old_zip_and_self_check(build_exe, tmp_path):
+    build_dir, dist_dir = tmp_path / "build", tmp_path / "dist"
+    build_dir.mkdir()
+    dist_dir.mkdir()
+    (dist_dir / "ExperimentPlanner-0.1.0.zip").write_bytes(b"old")
+    (dist_dir / "ExperimentPlanner-0.0.9.zip").write_bytes(b"other version")
+    (build_dir / "self-check.txt").write_text("正常", encoding="utf-8")
+    build_exe.clean_previous_outputs(build_dir, dist_dir, "0.1.0")
+    assert not (dist_dir / "ExperimentPlanner-0.1.0.zip").exists()
+    assert not (build_dir / "self-check.txt").exists()
+    assert (dist_dir / "ExperimentPlanner-0.0.9.zip").exists()
+    build_exe.clean_previous_outputs(build_dir, dist_dir, "0.1.0")  # 檔案不存在時不報錯
