@@ -8,13 +8,14 @@ import os
 import subprocess
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from playwright.sync_api import sync_playwright
 
 from instrument_booking.browser.sheet_page import NAME_BOX, PlaywrightSheetPage
 
-EDGE_PATH = Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")
+EDGE_RELATIVE = Path("Microsoft") / "Edge" / "Application" / "msedge.exe"
+EDGE_ROOT_VARS = ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA")  # 依序尋找（系統安裝、64 位元、只裝給目前使用者）
 GOOGLE_LOGIN_HOST = "accounts.google.com"
 BACKGROUND_ARGS = [
     "--start-minimized",
@@ -37,14 +38,26 @@ def default_profile_dir() -> Path:
     return Path(os.environ["LOCALAPPDATA"]) / "InstrumentBooking" / "edge-profile"
 
 
-def open_login_window(url: str, profile_dir: Path, *, edge_path: Path = EDGE_PATH,
+def find_edge(env: Mapping[str, str] = os.environ, is_file: Callable[[Path], bool] = Path.is_file) -> Path:
+    """系統 Edge 的位置；找不到時拋 SessionError。"""
+    for var in EDGE_ROOT_VARS:
+        root = env.get(var)
+        if root:
+            candidate = Path(root) / EDGE_RELATIVE
+            if is_file(candidate):
+                return candidate
+    raise SessionError("找不到 Microsoft Edge：請先安裝 Edge，再重新登入")
+
+
+def open_login_window(url: str, profile_dir: Path, *, edge_path: Path | None = None,
                       popen: Callable = subprocess.Popen):
     """以一般（非自動化）Edge 開啟專屬設定檔，讓使用者手動登入 Google；登入後關閉視窗即可。
 
     呼叫前必須先關閉同一設定檔的 EdgeSession，否則網址會被交給自動化中的瀏覽器。
     """
+    edge = edge_path or find_edge()
     profile_dir.mkdir(parents=True, exist_ok=True)
-    return popen([str(edge_path), f"--user-data-dir={profile_dir}", "--no-first-run",
+    return popen([str(edge), f"--user-data-dir={profile_dir}", "--no-first-run",
                   "--no-default-browser-check", url])
 
 

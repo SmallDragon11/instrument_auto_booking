@@ -7,6 +7,7 @@ from instrument_booking.browser.session import (
     EdgeSession,
     NotLoggedIn,
     SessionError,
+    find_edge,
     open_login_window,
 )
 from instrument_booking.browser.sheet_page import NAME_BOX, OP_TIMEOUT_MS
@@ -174,6 +175,32 @@ def test_open_login_window_uses_plain_edge_with_profile(tmp_path):
     assert f"--user-data-dir={tmp_path / 'profile'}" in args
     assert args[-1] == URL
     assert (tmp_path / "profile").is_dir()
+
+
+def test_open_login_window_finds_edge_by_default(tmp_path, monkeypatch):
+    import instrument_booking.browser.session as session_module
+    monkeypatch.setattr(session_module, "find_edge", lambda: Path("D:/found/msedge.exe"))
+    calls = []
+    open_login_window(URL, tmp_path / "profile", popen=calls.append)
+    assert calls[0][0] == str(Path("D:/found/msedge.exe"))
+
+
+EDGE_X86 = Path("C:/PF86") / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+EDGE_64 = Path("C:/PF") / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+EDGE_USER = Path("C:/Users/z/AppData/Local") / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+ENV = {"ProgramFiles(x86)": "C:/PF86", "ProgramFiles": "C:/PF", "LOCALAPPDATA": "C:/Users/z/AppData/Local"}
+
+
+def test_find_edge_prefers_program_files_x86_then_64_bit_then_user_install():
+    assert find_edge(ENV, lambda p: p in {EDGE_X86, EDGE_64, EDGE_USER}) == EDGE_X86
+    assert find_edge(ENV, lambda p: p in {EDGE_64, EDGE_USER}) == EDGE_64
+    assert find_edge(ENV, lambda p: p == EDGE_USER) == EDGE_USER
+    assert find_edge({"LOCALAPPDATA": "C:/Users/z/AppData/Local"}, lambda p: p == EDGE_USER) == EDGE_USER
+
+
+def test_find_edge_reports_missing_edge_in_chinese():
+    with pytest.raises(SessionError, match="找不到 Microsoft Edge"):
+        find_edge(ENV, lambda p: False)
 
 
 def test_launch_failure_stops_playwright():
