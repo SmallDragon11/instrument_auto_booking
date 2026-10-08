@@ -55,3 +55,12 @@ def test_startup_failure_is_shown_and_releases_instance(qtbot, tmp_path, monkeyp
     assert len(errors) == 1
     assert "無法啟動" in errors[0][0]
     assert SingleInstance(key).acquire()  # 結束時已釋放
+
+
+def test_self_check_writes_result_without_starting_the_app(tmp_path):
+    out = tmp_path / "result.txt"
+    assert main(["app", "--self-check", str(out)], instance_key="unused",
+                self_check=lambda: (True, "Edge 自動化正常（版本 1）")) == 0
+    assert out.read_text(encoding="utf-8") == "Edge 自動化正常（版本 1）\n"
+    assert not (tmp_path / "data").exists()
+    assert main(["app", "--self-check"], self_check=lambda: (False, "失敗")) == 1
