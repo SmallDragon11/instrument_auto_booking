@@ -5,7 +5,8 @@ param(
     [string]$DesktopDir = [Environment]::GetFolderPath('Desktop'),
     [string]$StartMenuDir = [Environment]::GetFolderPath('Programs'),
     [switch]$NoLaunch,
-    [switch]$Quiet
+    [switch]$Quiet,
+    [string]$ProcessName = 'ExperimentPlanner'
 )
 $ErrorActionPreference = 'Stop'
 $Title = '實驗規劃助手'
@@ -22,7 +23,7 @@ try {
         throw "找不到程式檔案：請先把整個 zip 解壓縮，再執行資料夾裡的「安裝.cmd」。"
     }
     $prefix = $InstallDir.TrimEnd('\') + '\'
-    $running = (Get-Process -Name 'ExperimentPlanner' -ErrorAction SilentlyContinue) -or
+    $running = (Get-Process -Name $ProcessName -ErrorAction SilentlyContinue) -or
         (Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith($prefix, [StringComparison]::OrdinalIgnoreCase) })
     if ($running) {
         throw "實驗規劃助手正在執行：請先在系統匣圖示按右鍵 →「結束」，再重新安裝。"

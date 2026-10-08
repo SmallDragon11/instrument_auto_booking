@@ -2,6 +2,7 @@
 import ctypes
 import shutil
 import subprocess
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -17,11 +18,13 @@ def make_package(tmp_path: Path) -> Path:
     return pkg
 
 
-def run_install(pkg: Path, tmp_path: Path) -> subprocess.CompletedProcess:
+def run_install(pkg: Path, tmp_path: Path, process_name: str = None) -> subprocess.CompletedProcess:
+    if process_name is None:
+        process_name = f"ExperimentPlanner-test-{uuid.uuid4().hex}"
     return subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(pkg / "install.ps1"),
          "-InstallDir", str(tmp_path / "inst"), "-DesktopDir", str(tmp_path / "desk"),
-         "-StartMenuDir", str(tmp_path / "start"), "-NoLaunch", "-Quiet"],
+         "-StartMenuDir", str(tmp_path / "start"), "-NoLaunch", "-Quiet", "-ProcessName", process_name],
         capture_output=True, timeout=120)
 
 
@@ -82,13 +85,14 @@ def test_locked_file_makes_install_fail_quickly_instead_of_hanging(tmp_path):
     assert run_install(pkg, tmp_path).returncode == 0
     (pkg / "ExperimentPlanner" / "_internal" / "lib.dll").write_bytes(b"a different, longer lib")
     out_file = tmp_path / "out.txt"
+    process_name = f"ExperimentPlanner-test-{uuid.uuid4().hex}"
     with exclusive_lock(tmp_path / "inst" / "_internal" / "lib.dll"):
         # 輸出寫進檔案而不是管線：逾時時不會因殘留的 robocopy 子程序握著管線而卡住測試。
         with out_file.open("wb") as out:
             result = subprocess.run(
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(pkg / "install.ps1"),
                  "-InstallDir", str(tmp_path / "inst"), "-DesktopDir", str(tmp_path / "desk"),
-                 "-StartMenuDir", str(tmp_path / "start"), "-NoLaunch", "-Quiet"],
+                 "-StartMenuDir", str(tmp_path / "start"), "-NoLaunch", "-Quiet", "-ProcessName", process_name],
                 stdout=out, stderr=subprocess.STDOUT, timeout=60)
     assert result.returncode == 1
     assert b"robocopy" in out_file.read_bytes()
