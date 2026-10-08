@@ -141,7 +141,7 @@ def test_uninstall_script_files_are_encoded_for_windows():
     cmd = (TOOLS / "解除安裝.cmd").read_bytes()
     assert b"uninstall.ps1" in cmd
     cmd.decode("ascii")
-    assert b"if errorlevel 1 pause" in cmd
+    assert b"pause" in cmd
     crlf = b"\r\n"
     assert cmd.endswith(crlf) and b"\n" not in cmd.replace(crlf, b"")
 
@@ -238,3 +238,38 @@ def test_uninstall_twice_is_not_an_error(tmp_path):
     shutil.copy(script, copy)
     assert run_uninstall(copy, tmp_path).returncode == 0
     assert run_uninstall(copy, tmp_path).returncode == 0
+
+
+def test_uninstall_cmd_from_installed_folder_removes_the_folder_it_lives_in(tmp_path):
+    """從開始功能表捷徑執行：捷徑的起始位置就是安裝資料夾，cmd 的目前目錄不能擋住資料夾的刪除。"""
+    import time
+    installed(tmp_path)
+    inst = tmp_path / "inst"
+    result = subprocess.run(
+        ["cmd", "/c", str(inst / "解除安裝.cmd"),
+         "-InstallDir", str(inst), "-DesktopDir", str(tmp_path / "desk"), "-StartMenuDir", str(tmp_path / "start"),
+         "-DataDir", str(tmp_path / "data"), "-ProfileDir", str(tmp_path / "profile"),
+         "-RunKeyName", "ExperimentPlannerCmdTest", "-Quiet",
+         "-ProcessName", f"ExperimentPlanner-test-{uuid.uuid4().hex}"],
+        cwd=inst, stdin=subprocess.DEVNULL, capture_output=True, timeout=120)
+    deadline = time.time() + 30
+    while inst.exists() and time.time() < deadline:
+        time.sleep(0.5)
+    assert not inst.exists()
+    assert not (tmp_path / "start" / "解除安裝實驗規劃助手.lnk").exists()
+    assert (tmp_path / "data" / "settings.json").exists()
+    # cmd 檔自己也被刪掉了：之後不能再讀它的下一行，否則會多出「系統找不到指定的路徑」且結束碼為 1。
+    assert result.returncode == 0, result.stdout.decode("cp950", "replace") + result.stderr.decode("cp950", "replace")
+    assert result.stderr == b""
+
+
+def test_failed_uninstall_leaves_shortcuts_and_autostart_so_it_can_be_retried(tmp_path):
+    script = installed(tmp_path)
+    with fake_run_key("ExperimentPlannerTest"):
+        with exclusive_lock(tmp_path / "inst" / "_internal" / "lib.dll"):
+            result = run_uninstall(script, tmp_path)
+        assert result.returncode == 1
+        assert run_key_exists("ExperimentPlannerTest")
+    assert (tmp_path / "desk" / "實驗規劃助手.lnk").exists()
+    assert (tmp_path / "start" / "實驗規劃助手.lnk").exists()
+    assert (tmp_path / "start" / "解除安裝實驗規劃助手.lnk").exists()

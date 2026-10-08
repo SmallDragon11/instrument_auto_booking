@@ -44,13 +44,14 @@ try {
     }
     $removeData = Confirm-RemoveData
 
+    # 程式資料夾最容易刪不掉（檔案被佔用），先刪；失敗時自動啟動與捷徑都還在，可以直接重試。
+    if ($hasFolder) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
     Remove-ItemProperty -Path $RunKeyPath -Name $RunKeyName -ErrorAction SilentlyContinue
     foreach ($link in @((Join-Path $DesktopDir "$Title.lnk"),
                         (Join-Path $StartMenuDir "$Title.lnk"),
                         (Join-Path $StartMenuDir "解除安裝$Title.lnk"))) {
         Remove-Item -LiteralPath $link -Force -ErrorAction SilentlyContinue
     }
-    if ($hasFolder) { Remove-Item -LiteralPath $InstallDir -Recurse -Force }
     if ($removeData) {
         foreach ($dir in @($DataDir, $ProfileDir)) {
             if (Test-Path -LiteralPath $dir) { Remove-Item -LiteralPath $dir -Recurse -Force }
