@@ -16,7 +16,7 @@ if str(ROOT / "src") not in sys.path:
     sys.path.insert(0, str(ROOT / "src"))  # 未以 pip install -e 安裝時也能匯入 instrument_booking（產生圖示用）
 APP_NAME = "ExperimentPlanner"
 DISPLAY_NAME = "實驗規劃助手"
-INSTALL_FILES = ("install.ps1", "安裝.cmd")
+INSTALL_FILES = ("install.ps1", "安裝.cmd", "uninstall.ps1", "解除安裝.cmd")
 GUIDE_SOURCE = Path("docs") / "使用說明.md"
 GUIDE_NAME = "使用說明.txt"
 

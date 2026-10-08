@@ -38,6 +38,9 @@ try {
     if ($LASTEXITCODE -ge 8) {
         throw "複製程式檔案失敗（robocopy 代碼 $LASTEXITCODE）：請確認程式已結束後，重新執行「安裝.cmd」。安裝完成前程式可能無法啟動。"
     }
+    foreach ($name in @('uninstall.ps1', '解除安裝.cmd')) {
+        Copy-Item -LiteralPath (Join-Path $PSScriptRoot $name) -Destination $InstallDir -Force
+    }
     Get-ChildItem -LiteralPath $InstallDir -Recurse -File | Unblock-File
     $exe = Join-Path $InstallDir $ExeName
     $shell = New-Object -ComObject WScript.Shell
@@ -50,6 +53,13 @@ try {
         $link.Description = $Title
         $link.Save()
     }
+    New-Item -ItemType Directory -Force -Path $StartMenuDir | Out-Null
+    $link = $shell.CreateShortcut((Join-Path $StartMenuDir "解除安裝$Title.lnk"))
+    $link.TargetPath = Join-Path $InstallDir '解除安裝.cmd'
+    $link.WorkingDirectory = $InstallDir
+    $link.IconLocation = "$exe,0"
+    $link.Description = "解除安裝$Title"
+    $link.Save()
     if (-not $NoLaunch) { Start-Process -FilePath $exe -WorkingDirectory $InstallDir }
     Show-Message "安裝完成。之後可以從桌面或開始功能表的「$Title」開啟。" 64
     exit 0

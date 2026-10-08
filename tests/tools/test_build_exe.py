@@ -46,8 +46,10 @@ def test_package_zip_contains_app_installer_and_guide(build_exe, tmp_path):
         "ExperimentPlanner-0.1.0/ExperimentPlanner/ExperimentPlanner.exe",
         "ExperimentPlanner-0.1.0/ExperimentPlanner/_internal/lib.dll",
         "ExperimentPlanner-0.1.0/install.ps1",
+        "ExperimentPlanner-0.1.0/uninstall.ps1",
         "ExperimentPlanner-0.1.0/使用說明.txt",
         "ExperimentPlanner-0.1.0/安裝.cmd",
+        "ExperimentPlanner-0.1.0/解除安裝.cmd",
     ]
     with zipfile.ZipFile(tmp_path / "out.zip") as z:
         assert z.read("ExperimentPlanner-0.1.0/使用說明.txt") == (build_exe.ROOT / "docs" / "使用說明.md").read_bytes()

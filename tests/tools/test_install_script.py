@@ -14,7 +14,8 @@ def make_package(tmp_path: Path) -> Path:
     (pkg / "ExperimentPlanner" / "_internal").mkdir(parents=True)
     (pkg / "ExperimentPlanner" / "ExperimentPlanner.exe").write_bytes(b"MZ fake")
     (pkg / "ExperimentPlanner" / "_internal" / "lib.dll").write_bytes(b"lib")
-    shutil.copy(TOOLS / "install.ps1", pkg / "install.ps1")
+    for name in ("install.ps1", "uninstall.ps1", "解除安裝.cmd"):
+        shutil.copy(TOOLS / name, pkg / name)
     return pkg
 
 
@@ -115,3 +116,125 @@ def test_install_works_when_package_path_contains_brackets(tmp_path):
     result = run_install(pkg, root)
     assert result.returncode == 0, result.stdout.decode("utf-8", "replace")
     assert (root / "inst" / "ExperimentPlanner.exe").exists()
+
+
+def test_install_places_uninstaller_and_start_menu_shortcut(tmp_path):
+    pkg = make_package(tmp_path)
+    assert run_install(pkg, tmp_path).returncode == 0
+    assert (tmp_path / "inst" / "uninstall.ps1").exists()
+    assert (tmp_path / "inst" / "解除安裝.cmd").exists()
+    assert (tmp_path / "start" / "解除安裝實驗規劃助手.lnk").exists()
+    assert not (tmp_path / "desk" / "解除安裝實驗規劃助手.lnk").exists()
+
+
+def test_reinstall_keeps_uninstaller(tmp_path):
+    pkg = make_package(tmp_path)
+    assert run_install(pkg, tmp_path).returncode == 0
+    assert run_install(pkg, tmp_path).returncode == 0
+    assert (tmp_path / "inst" / "uninstall.ps1").exists()
+
+
+# ---- 解除安裝 ----
+
+def test_uninstall_script_files_are_encoded_for_windows():
+    assert (TOOLS / "uninstall.ps1").read_bytes()[:3] == b"\xef\xbb\xbf"
+    cmd = (TOOLS / "解除安裝.cmd").read_bytes()
+    assert b"uninstall.ps1" in cmd
+    cmd.decode("ascii")
+    assert b"if errorlevel 1 pause" in cmd
+    crlf = b"\r\n"
+    assert cmd.endswith(crlf) and b"\n" not in cmd.replace(crlf, b"")
+
+
+@contextmanager
+def fake_run_key(name: str):
+    import winreg
+    key = winreg.CreateKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run")
+    winreg.SetValueEx(key, name, 0, winreg.REG_SZ, '"x.exe" --background')
+    try:
+        yield name
+    finally:
+        try:
+            winreg.DeleteValue(key, name)
+        except FileNotFoundError:
+            pass
+        key.Close()
+
+
+def run_key_exists(name: str) -> bool:
+    import winreg
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\Microsoft\Windows\CurrentVersion\Run") as k:
+            winreg.QueryValueEx(k, name)
+            return True
+    except FileNotFoundError:
+        return False
+
+
+def installed(tmp_path: Path) -> Path:
+    pkg = make_package(tmp_path)
+    assert run_install(pkg, tmp_path).returncode == 0
+    (tmp_path / "data").mkdir()
+    (tmp_path / "data" / "settings.json").write_text("{}", encoding="utf-8")
+    (tmp_path / "profile").mkdir()
+    (tmp_path / "profile" / "cookie").write_text("c", encoding="utf-8")
+    return tmp_path / "inst" / "uninstall.ps1"
+
+
+def run_uninstall(script: Path, tmp_path: Path, *extra: str, process_name: str = None, run_key: str = "ExperimentPlannerTest"):
+    if process_name is None:
+        process_name = f"ExperimentPlanner-test-{uuid.uuid4().hex}"
+    return subprocess.run(
+        ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+         "-InstallDir", str(tmp_path / "inst"), "-DesktopDir", str(tmp_path / "desk"),
+         "-StartMenuDir", str(tmp_path / "start"), "-DataDir", str(tmp_path / "data"),
+         "-ProfileDir", str(tmp_path / "profile"), "-RunKeyName", run_key,
+         "-Quiet", "-ProcessName", process_name, *extra],
+        capture_output=True, timeout=120)
+
+
+def test_uninstall_removes_program_shortcuts_and_autostart_but_keeps_data(tmp_path):
+    script = installed(tmp_path)
+    with fake_run_key("ExperimentPlannerTest"):
+        result = run_uninstall(script, tmp_path)
+        assert result.returncode == 0, result.stdout.decode("utf-8", "replace")
+        assert not run_key_exists("ExperimentPlannerTest")
+    assert not (tmp_path / "inst").exists()
+    assert not (tmp_path / "desk" / "實驗規劃助手.lnk").exists()
+    assert not (tmp_path / "start" / "實驗規劃助手.lnk").exists()
+    assert not (tmp_path / "start" / "解除安裝實驗規劃助手.lnk").exists()
+    assert (tmp_path / "data" / "settings.json").exists()
+    assert (tmp_path / "profile" / "cookie").exists()
+
+
+def test_uninstall_with_remove_data_deletes_settings_and_profile(tmp_path):
+    script = installed(tmp_path)
+    result = run_uninstall(script, tmp_path, "-RemoveData")
+    assert result.returncode == 0, result.stdout.decode("utf-8", "replace")
+    assert not (tmp_path / "data").exists()
+    assert not (tmp_path / "profile").exists()
+
+
+def test_uninstall_refuses_while_program_is_running(tmp_path):
+    script = installed(tmp_path)
+    result = run_uninstall(script, tmp_path, process_name="powershell")
+    assert result.returncode == 1
+    assert (tmp_path / "inst" / "ExperimentPlanner.exe").exists()
+    assert (tmp_path / "desk" / "實驗規劃助手.lnk").exists()
+
+
+def test_uninstall_refuses_to_delete_unrelated_folder(tmp_path):
+    script = installed(tmp_path)
+    (tmp_path / "inst" / "ExperimentPlanner.exe").unlink()
+    (tmp_path / "inst" / "keep.txt").write_text("keep", encoding="utf-8")
+    result = run_uninstall(script, tmp_path)
+    assert result.returncode == 1
+    assert (tmp_path / "inst" / "keep.txt").exists()
+
+
+def test_uninstall_twice_is_not_an_error(tmp_path):
+    script = installed(tmp_path)
+    copy = tmp_path / "uninstall-copy.ps1"
+    shutil.copy(script, copy)
+    assert run_uninstall(copy, tmp_path).returncode == 0
+    assert run_uninstall(copy, tmp_path).returncode == 0
