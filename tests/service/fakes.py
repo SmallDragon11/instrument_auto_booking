@@ -47,6 +47,15 @@ class InlineWorker:
             f.set_exception(e)
         return f
 
+    def close_idle_session(self):
+        f = Future()
+        if getattr(self, "held", False):
+            f.set_result(False)
+        else:
+            self.closed += 1
+            f.set_result(True)
+        return f
+
     def close_session(self):
         self.closed += 1
         f = Future()

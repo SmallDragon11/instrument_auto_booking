@@ -125,3 +125,19 @@ def test_shutdown_can_be_called_twice(setup):
     worker.shutdown()
     worker.shutdown()  # 例如 GUI 結束流程與測試清理都呼叫
     assert [e for e, _ in log] == ["start", "close"]
+
+
+def test_close_idle_session_keeps_held_browser(setup):
+    worker, log, _ = setup
+    worker.submit(lambda s: None, keep_open=True, hold=True).result()
+    assert worker.close_idle_session().result() is False
+    assert [e for e, _ in log] == ["start"]  # 待命寫入的 Edge 沒有被關掉
+    worker.submit(lambda s: None, hold=False).result()
+    assert [e for e, _ in log] == ["start", "close"]
+
+
+def test_close_idle_session_closes_unheld_browser(setup):
+    worker, log, _ = setup
+    worker.submit(lambda s: None, keep_open=True).result()
+    assert worker.close_idle_session().result() is True
+    assert [e for e, _ in log] == ["start", "close"]

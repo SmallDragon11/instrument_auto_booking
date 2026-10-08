@@ -109,3 +109,8 @@ def test_prune_snapshots_ignores_unlink_errors(tmp_path, monkeypatch):
 def test_describe_not_configured_shows_message_as_is():
     from instrument_booking.service.settings import NotConfigured
     assert describe_error(NotConfigured("請先完成設定：請填寫要寫入表格的名字")) == "請先完成設定：請填寫要寫入表格的名字"
+
+
+def test_describe_error_passes_login_blocked_message_through():
+    from instrument_booking.service.connection import LoginBlocked
+    assert describe_error(LoginBlocked("寫入結束前不能重新登入")) == "寫入結束前不能重新登入"

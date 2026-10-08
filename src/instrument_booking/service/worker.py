@@ -34,6 +34,13 @@ class BrowserWorker:
         """
         return self._executor.submit(self._run, job, keep_open, hold)
 
+    def close_idle_session(self) -> Future[bool]:
+        """關閉沒有保留中的瀏覽器（例如開啟登入視窗前）；保留中（預檢後待命寫入）時不關閉並回傳 False。
+
+        在瀏覽器執行緒判斷，排在已排入的工作之後：預檢若先排入並保留了 Edge，這裡一定看得到。
+        """
+        return self._executor.submit(self._close_if_idle)
+
     def close_session(self) -> Future[None]:
         """關閉瀏覽器並解除保留（使用者明確要求，例如開啟登入視窗前）；排在已排入的工作之後執行。"""
         return self._executor.submit(self._close)
@@ -59,6 +66,12 @@ class BrowserWorker:
         finally:
             if not keep_open and not self._hold:
                 self._close()
+
+    def _close_if_idle(self) -> bool:
+        if self._hold:
+            return False
+        self._close()
+        return True
 
     def _close(self) -> None:
         self._hold = False

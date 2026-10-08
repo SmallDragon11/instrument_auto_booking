@@ -19,6 +19,12 @@ from instrument_booking.service.occupancy import legend_for_week
 from instrument_booking.service.settings import NotConfigured, Settings, validate_settings
 
 NOT_SYNCED = "未校時"
+LOGIN_BLOCKED = "自動預約已準備好、Edge 待命中，寫入結束前不能重新登入"
+
+
+class LoginBlocked(Exception):
+    """預檢完成後 Edge 保留待命中：此時開啟登入視窗會關掉待命的 Edge，所以拒絕（訊息為繁體中文）。"""
+
 GOOGLE_SIGN_IN_URL = "https://accounts.google.com"
 
 
@@ -67,6 +73,8 @@ def run_connection_test(store, worker, snapshot_dir: Path, *, sync: Callable[[],
 def start_login(worker, settings: Settings, profile_dir: Path, *, popen: Callable = subprocess.Popen):
     """先關閉自動化中的瀏覽器（同一設定檔只能有一個 Edge），再開啟一般 Edge 讓使用者登入。
 
+    預檢完成、Edge 保留待命時拋 LoginBlocked（不關閉待命的 Edge）。
+
     尚未填預約表網址時開啟 Google 登入頁；網址無效時拋 NotConfigured（不關閉、不開啟任何瀏覽器）。
     """
     url = settings.spreadsheet_url.strip()
@@ -77,5 +85,6 @@ def start_login(worker, settings: Settings, profile_dir: Path, *, popen: Callabl
             raise NotConfigured("請先完成設定：預約表網址必須是 Google 試算表網址") from None
     else:
         url = GOOGLE_SIGN_IN_URL
-    worker.close_session().result()
+    if not worker.close_idle_session().result():
+        raise LoginBlocked(LOGIN_BLOCKED)
     return open_login_window(url, profile_dir, popen=popen)

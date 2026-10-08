@@ -3,7 +3,7 @@ from datetime import date
 import pytest
 
 from instrument_booking.core.clock import ClockSource, ClockSync
-from instrument_booking.service.connection import run_connection_test, start_login
+from instrument_booking.service.connection import LoginBlocked, run_connection_test, start_login
 from instrument_booking.service.settings import NotConfigured, Settings
 from instrument_booking.storage.json_store import JsonStore
 from service.fakes import FakeSession, InlineWorker, XlsxRequest
@@ -96,3 +96,12 @@ def test_unreadable_settings_are_reported_not_raised(tmp_path):
     assert not report.ok and "settings.json" in report.message
     assert (report.clock_source, report.clock_diff) == ("未校時", 0.0)
     assert worker.jobs == []
+
+
+def test_start_login_refuses_while_edge_is_held_for_writing(tmp_path):
+    worker = InlineWorker(FakeSession([]))
+    worker.held = True
+    calls = []
+    with pytest.raises(LoginBlocked, match="待命中"):
+        start_login(worker, Settings(name="Zoe", spreadsheet_url=URL), tmp_path / "profile", popen=calls.append)
+    assert calls == [] and worker.closed == 0
